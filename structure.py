@@ -294,7 +294,11 @@ def compute_initial_structure(
         u0=0.0,
         pbar_overrides=None,
         gap_thresh_mm: float = 5.0,
-        delta_c_min: float = 1.0 / 300.0):
+        delta_c_min: float = 1.0 / 300.0,
+        ubar0: float = 0.1,
+        w_SI: float = 1.0,
+        w_SII: float = 2.0,
+        w_SIV: float = 0.5):
     """
     计算薄透镜系统的初始结构（p、q、R、厚度）。
 
@@ -571,35 +575,66 @@ def compute_initial_structure(
                 1.0 / _R2x if 1e-12 < abs(_R2x) < 1e6 else 0.0)
         _proc_x0.add(_i)
 
-    # 3b. 目标函数：全组 Σ SI_k²（串行光线传播，u 跨面累积）
+    # 3b. 目标函数：全组 w_SI·SI² + w_SII·SII² + w_SIV·SIV²
+    #     同时追迹边缘光线(h,u)和主光线(hb,ub)，允许面间正负抵消
     def _joint_obj(x):
-        _tot = 0.0
-        _hj, _uj = h1, u0
+        # 边缘光线初始条件
+        _hj,  _uj  = h1,  u0
+        # 主光线初始条件：假设光阑在组前，ȳ₀=0，ū₀=ubar0
+        _hbj, _ubj = 0.0, ubar0
+        # 拉格朗日不变量平方：H = n₀(u₀·ȳ₀ - ū₀·y₀) = -(ubar0·h1)
+        _H2 = (ubar0 * h1) ** 2
+        # 三项像差线性累加（最后整体平方，允许面间正负抵消）
+        _si_sum  = 0.0
+        _sii_sum = 0.0
+        _siv_sum = 0.0
         for _fi_j, _li_j, _vj, _is_c in units_jt:
             if _is_c:
                 _n2j, _n3j = nd[_fi_j], nd[_li_j]
                 for _cs_j, _nb_j, _na_j in [
-                    (x[_vj[0]], 1.0,   _n2j),
+                    (x[_vj[0]], 1.0,  _n2j),
                     (x[_vj[1]], _n2j,  _n3j),
-                    (x[_vj[2]], _n3j,  1.0),
+                    (x[_vj[2]], _n3j, 1.0),
                 ]:
-                    _Aj  = _nb_j * _uj + (_na_j - _nb_j) * _cs_j * _hj
-                    _unj = _Aj / _na_j
-                    _tot += (_Aj**2 * _hj * (_unj / _na_j - _uj / _nb_j))**2
+                    _Aj   = _nb_j * _uj  + (_na_j - _nb_j) * _cs_j * _hj
+                    _Abj  = _nb_j * _ubj + (_na_j - _nb_j) * _cs_j * _hbj
+                    _unj  = _Aj  / _na_j
+                    _ubnj = _Abj / _na_j
+                    _du_n = _unj / _na_j - _uj / _nb_j
+                    _d1_n = 1.0 / _na_j - 1.0 / _nb_j
+                    _si_sum  += _Aj**2      * _hj * _du_n
+                    _sii_sum += _Aj * _Abj  * _hj * _du_n
+                    _siv_sum += _H2 * _cs_j * _d1_n if abs(_cs_j) > 1e-14 else 0.0
                     _uj  = _unj
+                    _ubj = _ubnj
             else:
                 _nij = nd[_fi_j]
                 # 前表面（n_before=1 → n_after=ni）
-                _A1j = _uj + (_nij - 1.0) * x[_vj[0]] * _hj
-                _umj = _A1j / _nij
-                _tot += (_A1j**2 * _hj * (_umj / _nij - _uj))**2
+                _c1j  = x[_vj[0]]
+                _A1j  = _uj  + (_nij - 1.0) * _c1j * _hj
+                _Ab1j = _ubj + (_nij - 1.0) * _c1j * _hbj
+                _umj  = _A1j  / _nij
+                _ubmj = _Ab1j / _nij
+                _du1  = _umj / _nij - _uj
+                _d1_1 = 1.0 / _nij - 1.0
+                _si_sum  += _A1j**2       * _hj * _du1
+                _sii_sum += _A1j * _Ab1j  * _hj * _du1
+                _siv_sum += _H2 * _c1j * _d1_1 if abs(_c1j) > 1e-14 else 0.0
                 # 后表面（n_before=ni → n_after=1）
-                _A2j = _nij * _umj + (1.0 - _nij) * x[_vj[1]] * _hj
-                _tot += (_A2j**2 * _hj * (_A2j - _umj / _nij))**2
+                _c2j  = x[_vj[1]]
+                _A2j  = _nij * _umj  + (1.0 - _nij) * _c2j * _hj
+                _Ab2j = _nij * _ubmj + (1.0 - _nij) * _c2j * _hbj
+                _du2  = _A2j - _umj / _nij
+                _d1_2 = 1.0 - 1.0 / _nij
+                _si_sum  += _A2j**2       * _hj * _du2
+                _sii_sum += _A2j * _Ab2j  * _hj * _du2
+                _siv_sum += _H2 * _c2j * _d1_2 if abs(_c2j) > 1e-14 else 0.0
                 _uj  = _A2j
+                _ubj = _Ab2j
             if _li_j < N - 1:
-                _hj = _hj + spacings_mm[_li_j] * _uj
-        return _tot
+                _hj  += spacings_mm[_li_j] * _uj
+                _hbj += spacings_mm[_li_j] * _ubj
+        return w_SI * _si_sum**2 + w_SII * _sii_sum**2 + w_SIV * _siv_sum**2
 
     # 3c. 等式约束：每片光焦度守恒 φ = (n-1)(c_front - c_back)
     _jconstr = []
@@ -785,7 +820,9 @@ def compute_initial_structure(
         print(f"  选取方法：{cr['method']}")
 
     # 联合优化诊断输出
-    print(f"\n【联合优化】目标函数（ΣSI²）：{_si0_jt:.6e} → {_si_final_jt:.6e}")
+    print(f"\n【联合优化】目标函数（wSI·SI²+wSII·SII²+wSIV·SIV²）"
+          f"[wSI={w_SI}, wSII={w_SII}, wSIV={w_SIV}]："
+          f"{_si0_jt:.6e} → {_si_final_jt:.6e}")
     if _adj_pairs_jt:
         print(f"  相邻面曲率差约束触发情况：")
         for _li_d, _fi_d, _ib_d, _if_d, _gap_d in _adj_pairs_jt:

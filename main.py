@@ -958,8 +958,31 @@ def run_action_a_pipeline(params: dict):
                     f"focal_lengths_mm（{len(f_list)} 项）长度不匹配。"
                 )
 
+            # seidel 模式同样需要计算 pbar_overrides，与 structure/auto 模式保持一致
+            _pbar_overrides_seidel = {}
+            _csv_group_seidel = gp.get("zoom_csv_group")
+            if S_ZOOM_CSV is not None and _csv_group_seidel is not None:
+                _csv_path_seidel = (S_ZOOM_CSV if S_ZOOM_CSV.is_absolute()
+                                    else Path(__file__).parent / S_ZOOM_CSV)
+                _lens_map_seidel = {i: _csv_group_seidel
+                                    for i in range(len(gp["structure"]))}
+                try:
+                    zoom_ray_data_seidel = load_zoom_ray_csv(
+                        _csv_path_seidel, _lens_map_seidel)
+                    for lens_idx, positions in zoom_ray_data_seidel.items():
+                        p_bar, _, _ = compute_pbar_from_zoom_data(
+                            positions, verbose=False)
+                        _pbar_overrides_seidel[lens_idx] = p_bar
+                    print(f"  {gp['name']} pbar_overrides = {{"
+                          + ", ".join(f"{k}: {v:+.6f}"
+                                      for k, v in _pbar_overrides_seidel.items())
+                          + "}")
+                except Exception as _e:
+                    print(f"  ⚠ [{gp['name']}] 变焦 CSV 读取失败：{_e}，"
+                          f"使用单点 p 值。")
+
             with open(os.devnull, 'w', encoding='utf-8') as devnull, \
-                 contextlib.redirect_stdout(devnull):
+                    contextlib.redirect_stdout(devnull):
                 struct_result = compute_initial_structure(
                     glass_names      = gnames,
                     nd_values        = nd_vals,
@@ -971,6 +994,7 @@ def run_action_a_pipeline(params: dict):
                     t_edge_min       = S_T_EDGE_MIN[gi],
                     t_center_min     = S_T_CENTER_MIN[gi],
                     t_cemented_min   = S_T_CEMENTED_MIN[gi],
+                    pbar_overrides   = _pbar_overrides_seidel,
                 )
 
             seidel_struct_results.append(struct_result)
