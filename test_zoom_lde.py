@@ -112,15 +112,8 @@ def _load_all_from_json(json_path):
     raw_tuples = [(c['name'], c['efl'], c['d1'], c['d2'], c['d3'], c['epd'])
                   for c in raw_cfgs]
 
-    # 计算各组轴向总厚度（从第一面到最后面的厚度之和，不含最后面的 t=0）
-    group_thicknesses = []
-    for group_data in sp_groups:
-        t_total = sum(s['t'] for s in group_data['surfaces'][:-1])  # 最后面 t=0 不计
-        group_thicknesses.append(t_total)
-    print(f"    组厚度: {['%.2f' % t for t in group_thicknesses]} mm")
-
     from zoom_utils import correct_zoom_spacings
-    corrected = correct_zoom_spacings(raw_tuples, group_pp, group_thicknesses)
+    corrected = correct_zoom_spacings(raw_tuples, group_pp)
 
     return prescription, corrected
 

@@ -307,7 +307,7 @@ def load_zoom_configs_for_zemax(
     return zoom_configs
 
 
-def correct_zoom_spacings(zoom_configs, group_principal_planes, group_thicknesses=None):
+def correct_zoom_spacings(zoom_configs, group_principal_planes):
     """
     将高斯光学（薄透镜/主面间距）的变焦间距修正为物理面间距。
 
@@ -331,11 +331,6 @@ def correct_zoom_spacings(zoom_configs, group_principal_planes, group_thicknesse
         4个组的主面数据，每个元素为 (delta_H, delta_Hp)
         索引 0=G1, 1=G2, 2=G3, 3=G4
         来自 compute_initial_structure 返回的 delta_H, delta_Hp
-    group_thicknesses : list[float] | None
-        4个组从第一面到最后面的轴向总厚度 [t_G1, t_G2, t_G3, t_G4]（mm）。
-        如果提供，修正量 = (实际主面位置 - 半厚度近似位置)，
-        因为 Gaussianoptics 已经用半厚度近似做了一次转换。
-        如果为 None，使用完整主面修正（假设 CSV 是纯主面间距）。
 
     返回
     ----
@@ -356,39 +351,13 @@ def correct_zoom_spacings(zoom_configs, group_principal_planes, group_thicknesse
     for gap_idx in range(3):
         prev_group = gap_idx      # 0=G1, 1=G2, 2=G3
         next_group = gap_idx + 1  # 1=G2, 2=G3, 3=G4
-        dHp_prev = group_principal_planes[prev_group][1]  # H'到最后面距离
-        dH_next  = group_principal_planes[next_group][0]   # H到第一面距离
-
-        if group_thicknesses is not None:
-            # Gaussianoptics 已用半厚度近似：假设主面在组中心（t/2 处）
-            # 实际 H' 到组末面 = delta_Hp（正值=向右=组外）
-            # 实际 H 到组首面 = delta_H（正值=向右=组内）
-            # 半厚度近似：H' 在组末面左侧 t/2 处，H 在组首面右侧 t/2 处
-            # 修正量 = (实际主面偏离组末面/首面的距离) - (半厚度假设的距离)
-            t_prev = group_thicknesses[prev_group]
-            t_next = group_thicknesses[next_group]
-            # 半厚度假设：H' 在末面左侧 t_prev/2 → 从末面算 = -t_prev/2
-            # 实际：H' 在末面偏移 delta_Hp
-            # 差值：delta_Hp - (-t_prev/2) = delta_Hp + t_prev/2
-            corr_prev = dHp_prev + t_prev / 2.0  # H'实际比半厚度假设更靠右多少
-            # 半厚度假设：H 在首面右侧 t_next/2 → 从首面算 = +t_next/2
-            # 实际：H 在首面偏移 delta_H
-            # 差值：delta_H - t_next/2
-            corr_next = dH_next - t_next / 2.0   # H实际比半厚度假设更靠右多少
-            correction = corr_prev - corr_next
-        else:
-            # 完整修正（假设 CSV 是纯主面间距）
-            correction = dHp_prev - dH_next  # 通常为负值（物理间距 < 高斯间距）
+        dHp_prev = group_principal_planes[prev_group][1]  # delta_Hp
+        dH_next  = group_principal_planes[next_group][0]  # delta_H
+        correction = dHp_prev - dH_next  # 通常为负值（物理间距 < 高斯间距）
         corrections.append(correction)
 
     # 打印修正量
     print(f"\n[主面间距修正]")
-    if group_thicknesses is not None:
-        print(f"  模式：差量修正（Gaussianoptics 半厚度近似 → 实际主面位置）")
-        print(f"  组厚度: G1={group_thicknesses[0]:.2f}, G2={group_thicknesses[1]:.2f}, "
-              f"G3={group_thicknesses[2]:.2f}, G4={group_thicknesses[3]:.2f} mm")
-    else:
-        print(f"  模式：完整修正（CSV 为纯主面间距）")
     print(f"  {'间距':>12}  {'修正量(mm)':>10}  {'delta_Hp前组':>12}  {'delta_H后组':>12}")
     print("  " + "-" * 52)
     for i in range(3):
