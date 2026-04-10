@@ -31,3 +31,6 @@ Desktop.ini
 # Logs and temp
 *.log
 *.tmp
+
+*.ZDA
+*.txt
