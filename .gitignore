@@ -34,3 +34,7 @@ Desktop.ini
 
 *.ZDA
 *.txt
+
+111.csv
+*.json
+.claude/
