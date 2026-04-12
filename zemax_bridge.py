@@ -422,48 +422,61 @@ class ZemaxBridge:
         except Exception:
             return float('nan')
 
-    def read_zoom_efl(self) -> list:
+    def read_zoom_efl(self):
         """
-        逐配置切换，用 CardinalPoints 分析读取 EFL。
+        读取各配置的 EFL（mm）。
+        在 MFE 末尾为每个配置插入一对 CONF+EFFL 操作数，
+        一次 CalculateMeritFunction() 读出所有配置 EFL。
+        extension 模式下稳定可靠。
         返回 list[float]，长度 = 配置数。
-        匹配中文界面报告"焦长"行，取第二个数字（像空间 EFL 绝对值）。
         """
-        num_configs = self._system.MCE.NumberOfConfigurations
-        AnalysisIDM = self._ZOSAPI.Analysis.AnalysisIDM
-        results = []
-        tmp = tempfile.mktemp(suffix='.txt')
+        self._check_connected()
+        ZOSAPI    = self._ZOSAPI
+        TheSystem = self._system
+        TheMFE    = TheSystem.MFE
+        TheMCE    = TheSystem.MCE
 
-        for cfg_idx in range(1, num_configs + 1):
-            self._system.MCE.SetCurrentConfiguration(cfg_idx)
+        n_configs = TheMCE.NumberOfConfigurations
+        MeritType = ZOSAPI.Editors.MFE.MeritOperandType
 
-            analysis = self._system.Analyses.New_Analysis(
-                AnalysisIDM.CardinalPoints)
-            analysis.ApplyAndWaitForCompletion()
-            analysis.GetResults().GetTextFile(tmp)
-            analysis.Close()
+        # 记录插入前的行数，用于事后清理
+        base_rows = TheMFE.NumberOfOperands
+        inserted_rows = []  # 记录插入的行号，倒序删除用
 
-            efl = None
-            with open(tmp, 'r', encoding='utf-16-le', errors='ignore') as f:
-                for line in f:
-                    if '焦长' in line and ':' in line:
-                        parts = line.split(':')[-1].split()
-                        if len(parts) >= 2:
-                            efl = abs(float(parts[1]))
-                            break
+        try:
+            for cfg in range(1, n_configs + 1):
+                # 插入 CONF 操作数：强制本行及之后在配置 cfg 下计算
+                row_conf = TheMFE.NumberOfOperands + 1
+                op_conf = TheMFE.InsertNewOperandAt(row_conf)
+                op_conf.ChangeType(MeritType.CONF)
+                op_conf.Param1 = cfg
+                op_conf.Weight = 0.0
+                inserted_rows.append(row_conf)
 
-            if efl is None:
-                raise RuntimeError(
-                    f'Config {cfg_idx}: 无法从 CardinalPoints 报告中解析 EFL')
+                # 插入 EFFL 操作数：读取当前配置的 EFL
+                row_effl = TheMFE.NumberOfOperands + 1
+                op_effl = TheMFE.InsertNewOperandAt(row_effl)
+                op_effl.ChangeType(MeritType.EFFL)
+                op_effl.Param1 = 1   # 波长1（主波长）
+                op_effl.Weight = 0.0
+                inserted_rows.append(row_effl)
 
-            results.append(efl)
-            print(f'  [诊断] Config {cfg_idx}: EFL = {efl:.4f} mm')
+            # 一次计算，所有 EFFL 行同时更新
+            TheMFE.CalculateMeritFunction()
 
-        if os.path.exists(tmp):
-            os.remove(tmp)
+            # 读取每个 EFFL 行的值（每隔1行取一个，即偶数偏移行）
+            efls = []
+            for i, cfg in enumerate(range(1, n_configs + 1)):
+                effl_row = base_rows + 2 * i + 2  # base + CONF(奇) + EFFL(偶)
+                op = TheMFE.GetOperandAt(effl_row)
+                efls.append(float(op.Value))
 
-        # 恢复到 Config 1
-        self._system.MCE.SetCurrentConfiguration(1)
-        return results
+        finally:
+            # 倒序删除插入的行，恢复 MFE 原状
+            for row in reversed(inserted_rows):
+                TheMFE.RemoveOperandAt(row)
+
+        return efls
 
     # -----------------------------------------------------------------------
     # RMS Spot Size（真实光线追迹）
@@ -830,15 +843,38 @@ class ZemaxBridge:
         print(f"[write_zoom_system] MCE 清理默认空行后，操作数行数 = {TheMCE.NumberOfOperands}（期望 1）")
 
         # 9.3 写入 3 行 THIC 操作数（变焦间隔）
-        # Action_a 面编号 + 1 = Zemax Surface 编号
-        #   d1 → Surface  7 (Action_a 面 6，zoom_configs[i][2])
-        #   d2 → Surface 14 (Action_a 面13，zoom_configs[i][3])
-        #   d3 → Surface 19 (Action_a 面18，zoom_configs[i][4])
-        gap_map = [
-            (7,  2),   # (Zemax Surface 编号, zoom_configs 列索引)
-            (14, 3),
-            (19, 4),
+        # 动态计算各组间 gap 的 Zemax Surface 编号，不依赖硬编码。
+        # 原理：每组的第一面描述为 "片1(XXX) 前表面"，
+        #       该面的 Action_a idx 即等于前一组末尾 gap 面的 Zemax Surface 编号
+        #       （因为 Zemax Surface = Action_a idx + 1，而 gap 面 Action_a idx = G_next_start - 1）
+        # 先打印所有 desc，用于调试确认格式
+        print("[write_zoom_system] surface_prescription desc 样本（前5条）：")
+        for item in surface_prescription[:5]:
+            idx, desc = item[0], item[1]
+            print(f"  idx={idx}  desc={repr(desc)}")
+
+        # 用宽松匹配：desc 中包含 '片1(' 且包含 '前表面' 即可（不要求 startswith）
+        group_start_action_a = [
+            item[0] for item in surface_prescription
+            if '片1(' in item[1] and '前表面' in item[1]
         ]
+        print(f"[write_zoom_system] 检测到组元起始面 Action_a idx：{group_start_action_a}")
+        # group_start_action_a[0]=G1, [1]=G2, [2]=G3, [3]=G4
+        # d1 gap 在 Zemax Surface = group_start_action_a[1]（即 G2 起始 Action_a idx）
+        # d2 gap 在 Zemax Surface = group_start_action_a[2]
+        # d3 gap 在 Zemax Surface = group_start_action_a[3]
+        if len(group_start_action_a) < 4:
+            raise ValueError(
+                f"[write_zoom_system] 无法从 surface_prescription 检测到 4 个组元起始面，"
+                f"检测到：{group_start_action_a}。请确认 desc 字段包含 '片1(XXX) 前表面'。"
+            )
+        gap_map = [
+            (group_start_action_a[1], 2),   # d1: G1→G2 间距
+            (group_start_action_a[2], 3),   # d2: G2→G3 间距
+            (group_start_action_a[3], 4),   # d3: G3→G4 间距
+        ]
+        print(f"[write_zoom_system] gap 面动态检测：d1→Surface {group_start_action_a[1]}，"
+              f"d2→Surface {group_start_action_a[2]}，d3→Surface {group_start_action_a[3]}")
         n_configs = len(zoom_configs)
 
         for row_idx, (zemax_surf, cfg_col) in enumerate(gap_map, start=1):

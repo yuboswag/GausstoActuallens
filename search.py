@@ -16,6 +16,101 @@ from scoring import (is_valid, verify_constraints, optical_score, weighted_cost,
                      _process_one_combo)   # [FIX] 补充导入多进程工作函数
 
 # ============================================================
+# 预处理：V_gen 可行域剪枝（通用于任意 N 片）
+# ============================================================
+
+def prune_pools_by_vgen(candidate_pools, structure, phi_lo, phi_hi,
+                        safety=2.0, min_keep=15):
+    """
+    基于消色差约束 Σφᵢ/Vᵢ = 0 对各候选池做预剪枝，返回缩减后的池列表。
+    对任意 N 片、任意 pos/neg structure 通用，不依赖胶合结构。
+
+    原理
+    ----
+    对位置 i（role=pos），其对 Σφ/V 的最大贡献为 phi_hi / V_min_i。
+    消色差要求此贡献能被其余位置（neg 方向）平衡，即：
+        phi_hi / V_i  ≤  safety × Σ_{j≠i, role=neg} (phi_hi / V_min_j)
+
+    整理得 V_i 下界：
+        V_i  ≥  phi_hi / (safety × neg_cancel_capacity)
+
+    neg 位置同理，用 pos 的总消色差能力推算 neg 的 V 下界。
+
+    参数
+    ----
+    candidate_pools : list[list[(name, g_dict)]]，各片候选池（完整版，非 slim）
+    structure       : list[str]，如 ['pos','neg','pos','neg','pos']
+    phi_lo, phi_hi  : float，φ 绝对值下/上界（1/max_f, 1/min_f）
+    safety          : float，宽松系数，默认 2.0（避免过度剪枝漏掉边缘解）
+    min_keep        : int，每个池至少保留的候选数，防止剪枝过激
+
+    返回
+    ----
+    list[list[(name, g_dict)]]，长度与输入相同，每个池已过滤
+    """
+    N = len(candidate_pools)
+
+    # 各池的 V_gen 最小值（只取有效正值）
+    pool_v_min = []
+    for pool in candidate_pools:
+        vs = [g['V_gen'] for _, g in pool
+              if g.get('V_gen') and g['V_gen'] > 1.0]
+        pool_v_min.append(min(vs) if vs else 20.0)
+
+    # 计算 neg 方向总消色差能力（所有 neg 位置的最大 φ/V 贡献之和）
+    neg_cancel = sum(
+        phi_hi / pool_v_min[i]
+        for i, role in enumerate(structure)
+        if role == 'neg'
+    )
+    # 计算 pos 方向总消色差能力
+    pos_cancel = sum(
+        phi_hi / pool_v_min[i]
+        for i, role in enumerate(structure)
+        if role == 'pos'
+    )
+
+    pruned = []
+    for i, (pool, role) in enumerate(zip(candidate_pools, structure)):
+        if role == 'pos':
+            # pos 片的 φ/V 贡献必须能被 neg 片平衡
+            # 去掉本池自身贡献（避免循环依赖）
+            others_neg = neg_cancel  # neg 侧总量（pos 不贡献 neg cancel）
+            if others_neg < 1e-12:
+                pruned.append(pool)
+                continue
+            v_min_allowed = phi_hi / (safety * others_neg)
+        else:
+            # neg 片同理
+            others_pos = pos_cancel
+            if others_pos < 1e-12:
+                pruned.append(pool)
+                continue
+            v_min_allowed = phi_hi / (safety * others_pos)
+
+        filtered = [
+            (nm, g) for nm, g in pool
+            if g.get('V_gen') and g['V_gen'] >= v_min_allowed
+        ]
+
+        # 保底：至少保留 min_keep 个，防止过度剪枝
+        if len(filtered) < min_keep:
+            filtered = pool  # 回退到完整池
+
+        pruned.append(filtered)
+
+    # 打印剪枝效果摘要
+    for i, (orig, filt, role) in enumerate(
+            zip(candidate_pools, pruned, structure)):
+        removed = len(orig) - len(filt)
+        if removed > 0:
+            print(f"  [V_gen 剪枝] 片{i+1}({role})："
+                  f"{len(orig)} → {len(filt)} 种（剪掉 {removed} 种）")
+
+    return pruned
+
+
+# ============================================================
 # 第六部分：主穷举函数
 # ============================================================
 
@@ -112,6 +207,15 @@ def action_a(f_group, D, structure, apo,
             if not (0 <= idx < N):
                 raise ValueError(f"pool_overrides 片下标 {idx} 超出范围")
             candidate_pools[idx] = override_pool
+
+    # [NEW] V_gen 可行域预剪枝：在 APO 排序之前缩减各池大小
+    phi_lo_prune = 1.0 / max_f_mm
+    phi_hi_prune = 1.0 / min_f_mm
+    candidate_pools = prune_pools_by_vgen(
+        candidate_pools, structure,
+        phi_lo_prune, phi_hi_prune,
+        safety=2.0, min_keep=15,
+    )
 
     if apo:
         # 胶合感知排序辅助函数：
