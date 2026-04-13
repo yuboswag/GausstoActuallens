@@ -100,7 +100,7 @@ def _process_one_combo(args):
      phi_total, apo, b_fit,
      scan_indices, free_indices, scan_grids,
      min_f_mm, max_f_mm,
-     tol_disp, w_apo) = args
+     tol_disp, w_apo, valid_cemented_pairs_map) = args
 
     names = [name for name, _ in glass_combo]
 
@@ -108,15 +108,16 @@ def _process_one_combo(args):
     if not allow_duplicate_glass and len(set(names)) < len(names):
         return []
 
-    # 胶合面剪枝
+    # 胶合面剪枝（使用预过滤合法配对表，O(1) 查表替代 O(|pool|²) 循环）
     # [FIX-5] 使用 n_ref（工作波长折射率）和 V_gen（广义阿贝数），
     # 而非可见光的 nd 和 vd，宽谱/近红外下物理可信。
     for (ci, cj) in actual_cemented:
-        ni = glass_combo[ci][1]['n_ref']
-        nj = glass_combo[cj][1]['n_ref']
-        vi = glass_combo[ci][1]['V_gen'] or glass_combo[ci][1]['vd']
-        vj = glass_combo[cj][1]['V_gen'] or glass_combo[cj][1]['vd']
-        if abs(ni - nj) < 0.08 or abs(vi - vj) < 12:
+        valid_pairs = valid_cemented_pairs_map.get((ci, cj), [])
+        if not valid_pairs:
+            return []
+        # 当前组合的这对玻璃是否在合法配对集合中
+        pair = (glass_combo[ci], glass_combo[cj])
+        if pair not in valid_pairs:
             return []
 
     # 构建广义参数三元组 (n_ref, V_gen, dP_gen)
@@ -141,57 +142,125 @@ def _process_one_combo(args):
 
     local_results = []
 
-    # [OPT] 矩阵 A 只依赖玻璃参数，与扫描值无关——在循环外构建一次。
-    # 奇异（V_gen 相同或接近）时直接跳过整个组合，省去 20 次无效求解。
+    # ════════ 向量化批量扫描 ════════
     n_constraints = 3 if apo else 2
     A = build_A_matrix(glasses_param, free_indices, apo, b_fit)
     if A is None:
         return []
 
-    scan_iter = iterproduct(*scan_grids) if scan_grids else [()]
-    for scan_vals in scan_iter:
-        # [FIX-4] scan_vals 已是带符号的实际光焦度（mm⁻¹），无需再乘 phi_total
-        fixed_phis = {idx: val for idx, val in zip(scan_indices, scan_vals)}
+    N = len(structure)
 
-        # [OPT] 只重建 b_vec（随扫描值变化），A 已在循环外预构建
+    # 如果没有扫描变量，只有一个点
+    if not scan_grids:
+        fixed_phis = {}
         b_vec = build_b_vec(phi_total, glasses_param, fixed_phis, apo, b_fit)
         sol = solve_with_A(A, b_vec, glasses_param, free_indices, fixed_phis, n_constraints)
         if sol is None:
-            continue
+            return []
         if not is_valid(sol, structure, min_f_mm, max_f_mm):
-            continue
-
-        err_disp, err_apo = verify_constraints(
-            sol, glasses_param, phi_total, apo, b_fit
-        )
-        # 约束②：消初级色差（半软约束）——门槛由 tol_disp 控制，默认 5e-3
-        # 比原来的 1e-6 宽松得多，大幅增加候选方案数量。
+            return []
+        err_disp, err_apo = verify_constraints(sol, glasses_param, phi_total, apo, b_fit)
         if err_disp > tol_disp:
-            continue
-        # 约束③：消二级光谱（软约束）——不再硬过滤，改为在 optical_score 中
-        # 以 w_apo * err_apo 的形式计入惩罚项，让评分机制自然排序。
-
-        # 将 err_apo 传入 optical_score，None（非APO模式）时用 0.0
+            return []
         apo_err_val = err_apo if (apo and err_apo is not None) else 0.0
-        os_val = optical_score(sol, ns, vs, actual_cemented,
-                               err_apo=apo_err_val, w_apo=w_apo)
+        os_val = optical_score(sol, ns, vs, actual_cemented, err_apo=apo_err_val, w_apo=w_apo)
+        wc_val = weighted_cost(sol, rel_costs)
+        return [{
+            "names": names, "phis": sol, "ns": ns, "vs": vs, "Vgens": Vgens,
+            "dPgens": [g['dP_gen'] for _, g in glass_combo],
+            "dPgFs": [g['dPgF'] for _, g in glass_combo],
+            "rel_costs": rel_costs, "opt_score": os_val, "cost_score": wc_val,
+            "P_ptz": sum(p / n for p, n in zip(sol, ns)),
+            "err_disp": err_disp, "err_apo": err_apo,
+        }]
+
+    # ── 批量构建所有扫描点 ──
+    scan_points = np.array(list(iterproduct(*scan_grids)))  # shape: (M, n_scan)
+    M = len(scan_points)
+
+    # 预计算各扫描变量的固定贡献
+    scan_V_inv = np.array([1.0 / glasses_param[idx][1] for idx in scan_indices])  # (n_scan,)
+
+    b_all = np.zeros((n_constraints, M))
+    b_all[0, :] = phi_total - scan_points.sum(axis=1)
+    b_all[1, :] = -(scan_points * scan_V_inv).sum(axis=1)
+    if apo:
+        scan_apo_coeffs = np.array([
+            glasses_param[idx][2] / glasses_param[idx][1] + b_fit / glasses_param[idx][1]**2
+            for idx in scan_indices
+        ])
+        b_all[2, :] = -(scan_points * scan_apo_coeffs).sum(axis=1)
+
+    # ── 批量求解：A @ x = b → x = A_inv @ b ──
+    try:
+        A_inv = np.linalg.inv(A)
+    except np.linalg.LinAlgError:
+        return []
+
+    free_phis_all = A_inv @ b_all  # shape: (n_constraints, M)
+
+    # ── 重建完整 phi 数组 (N, M) ──
+    all_phis = np.zeros((N, M))
+    for k, idx in enumerate(scan_indices):
+        all_phis[idx, :] = scan_points[:, k]
+    for k, idx in enumerate(free_indices):
+        all_phis[idx, :] = free_phis_all[k, :]
+
+    # ── 批量校验：符号 + 焦距范围 ──
+    valid_mask = np.ones(M, dtype=bool)
+    for i_elem in range(N):
+        row = all_phis[i_elem, :]
+        if structure[i_elem] == 'pos':
+            valid_mask &= (row > 0)
+        else:
+            valid_mask &= (row < 0)
+        abs_phi = np.abs(row)
+        valid_mask &= (abs_phi > 1e-10)
+        f_abs = 1.0 / np.maximum(abs_phi, 1e-15)
+        valid_mask &= (f_abs >= min_f_mm) & (f_abs <= max_f_mm)
+
+    # ── 批量校验：消色差约束 ──
+    V_inv_all = np.array([1.0 / glasses_param[i][1] for i in range(N)])  # (N,)
+    err_disp_all = np.abs((all_phis * V_inv_all[:, None]).sum(axis=0))  # (M,)
+    valid_mask &= (err_disp_all <= tol_disp)
+
+    # ── 提取通过校验的结果 ──
+    valid_indices = np.where(valid_mask)[0]
+    if len(valid_indices) == 0:
+        return []
+
+    # 只对通过的点计算评分（通常很少，几个到几十个）
+    ns_arr = np.array(ns)
+
+    for vi in valid_indices:
+        sol = all_phis[:, vi].tolist()
+        err_disp = err_disp_all[vi]
+
+        if apo:
+            dPgens_arr = [glasses_param[i][2] for i in range(N)]
+            lhs = sum(sol[i] * (dPgens_arr[i] / glasses_param[i][1] + b_fit / glasses_param[i][1]**2)
+                      for i in range(N))
+            err_apo = abs(lhs)
+        else:
+            err_apo = None
+
+        apo_err_val = err_apo if (apo and err_apo is not None) else 0.0
+        os_val = optical_score(sol, ns, vs, actual_cemented, err_apo=apo_err_val, w_apo=w_apo)
         wc_val = weighted_cost(sol, rel_costs)
 
         local_results.append({
-            "names":      names,
-            "phis":       sol,
-            "ns":         ns,
-            "vs":         vs,
-            "Vgens":      Vgens,
-            "dPgens":     [g['dP_gen'] for _, g in glass_combo],
-            "dPgFs":      [g['dPgF']   for _, g in glass_combo],
-            "rel_costs":  rel_costs,
-            "opt_score":  os_val,
-            "cost_score": wc_val,
-            "P_ptz":      sum(p / n for p, n in zip(sol, ns)),
-            "err_disp":   err_disp,
-            "err_apo":    err_apo,
+            "names": names, "phis": sol, "ns": ns, "vs": vs, "Vgens": Vgens,
+            "dPgens": [g['dP_gen'] for _, g in glass_combo],
+            "dPgFs": [g['dPgF'] for _, g in glass_combo],
+            "rel_costs": rel_costs, "opt_score": os_val, "cost_score": wc_val,
+            "P_ptz": sum(p / n for p, n in zip(sol, ns)),
+            "err_disp": float(err_disp), "err_apo": err_apo,
         })
+
+    # ── 每组合只保留光学评分最优的方案 ──
+    if len(local_results) > 1:
+        local_results.sort(key=lambda x: x["opt_score"])
+        local_results = local_results[:1]
 
     return local_results
 

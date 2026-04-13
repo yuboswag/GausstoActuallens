@@ -4,6 +4,7 @@ search.py
 """
 
 import os
+import heapq
 import numpy as np
 from pathlib import Path
 from itertools import product as iterproduct
@@ -14,101 +15,6 @@ from glass_db import split_glass_db
 from solver import build_and_solve, pick_best_free_indices
 from scoring import (is_valid, verify_constraints, optical_score, weighted_cost,
                      _process_one_combo)   # [FIX] 补充导入多进程工作函数
-
-# ============================================================
-# 预处理：V_gen 可行域剪枝（通用于任意 N 片）
-# ============================================================
-
-def prune_pools_by_vgen(candidate_pools, structure, phi_lo, phi_hi,
-                        safety=2.0, min_keep=15):
-    """
-    基于消色差约束 Σφᵢ/Vᵢ = 0 对各候选池做预剪枝，返回缩减后的池列表。
-    对任意 N 片、任意 pos/neg structure 通用，不依赖胶合结构。
-
-    原理
-    ----
-    对位置 i（role=pos），其对 Σφ/V 的最大贡献为 phi_hi / V_min_i。
-    消色差要求此贡献能被其余位置（neg 方向）平衡，即：
-        phi_hi / V_i  ≤  safety × Σ_{j≠i, role=neg} (phi_hi / V_min_j)
-
-    整理得 V_i 下界：
-        V_i  ≥  phi_hi / (safety × neg_cancel_capacity)
-
-    neg 位置同理，用 pos 的总消色差能力推算 neg 的 V 下界。
-
-    参数
-    ----
-    candidate_pools : list[list[(name, g_dict)]]，各片候选池（完整版，非 slim）
-    structure       : list[str]，如 ['pos','neg','pos','neg','pos']
-    phi_lo, phi_hi  : float，φ 绝对值下/上界（1/max_f, 1/min_f）
-    safety          : float，宽松系数，默认 2.0（避免过度剪枝漏掉边缘解）
-    min_keep        : int，每个池至少保留的候选数，防止剪枝过激
-
-    返回
-    ----
-    list[list[(name, g_dict)]]，长度与输入相同，每个池已过滤
-    """
-    N = len(candidate_pools)
-
-    # 各池的 V_gen 最小值（只取有效正值）
-    pool_v_min = []
-    for pool in candidate_pools:
-        vs = [g['V_gen'] for _, g in pool
-              if g.get('V_gen') and g['V_gen'] > 1.0]
-        pool_v_min.append(min(vs) if vs else 20.0)
-
-    # 计算 neg 方向总消色差能力（所有 neg 位置的最大 φ/V 贡献之和）
-    neg_cancel = sum(
-        phi_hi / pool_v_min[i]
-        for i, role in enumerate(structure)
-        if role == 'neg'
-    )
-    # 计算 pos 方向总消色差能力
-    pos_cancel = sum(
-        phi_hi / pool_v_min[i]
-        for i, role in enumerate(structure)
-        if role == 'pos'
-    )
-
-    pruned = []
-    for i, (pool, role) in enumerate(zip(candidate_pools, structure)):
-        if role == 'pos':
-            # pos 片的 φ/V 贡献必须能被 neg 片平衡
-            # 去掉本池自身贡献（避免循环依赖）
-            others_neg = neg_cancel  # neg 侧总量（pos 不贡献 neg cancel）
-            if others_neg < 1e-12:
-                pruned.append(pool)
-                continue
-            v_min_allowed = phi_hi / (safety * others_neg)
-        else:
-            # neg 片同理
-            others_pos = pos_cancel
-            if others_pos < 1e-12:
-                pruned.append(pool)
-                continue
-            v_min_allowed = phi_hi / (safety * others_pos)
-
-        filtered = [
-            (nm, g) for nm, g in pool
-            if g.get('V_gen') and g['V_gen'] >= v_min_allowed
-        ]
-
-        # 保底：至少保留 min_keep 个，防止过度剪枝
-        if len(filtered) < min_keep:
-            filtered = pool  # 回退到完整池
-
-        pruned.append(filtered)
-
-    # 打印剪枝效果摘要
-    for i, (orig, filt, role) in enumerate(
-            zip(candidate_pools, pruned, structure)):
-        removed = len(orig) - len(filt)
-        if removed > 0:
-            print(f"  [V_gen 剪枝] 片{i+1}({role})："
-                  f"{len(orig)} → {len(filt)} 种（剪掉 {removed} 种）")
-
-    return pruned
-
 
 # ============================================================
 # 第六部分：主穷举函数
@@ -207,15 +113,6 @@ def action_a(f_group, D, structure, apo,
             if not (0 <= idx < N):
                 raise ValueError(f"pool_overrides 片下标 {idx} 超出范围")
             candidate_pools[idx] = override_pool
-
-    # [NEW] V_gen 可行域预剪枝：在 APO 排序之前缩减各池大小
-    phi_lo_prune = 1.0 / max_f_mm
-    phi_hi_prune = 1.0 / min_f_mm
-    candidate_pools = prune_pools_by_vgen(
-        candidate_pools, structure,
-        phi_lo_prune, phi_hi_prune,
-        safety=2.0, min_keep=15,
-    )
 
     if apo:
         # 胶合感知排序辅助函数：
@@ -343,11 +240,6 @@ def action_a(f_group, D, structure, apo,
         mark = "  ← 已覆盖" if (pool_overrides and i in pool_overrides) else ""
         print(f"  片{i+1}（{role}）候选：{len(pool)} 种{mark}")
 
-    total_combos = 1
-    for pool in candidate_pools:
-        total_combos *= len(pool)
-    print(f"  开始穷举，共 {total_combos:,} 种玻璃组合...", flush=True)
-
     # [OPT-3] 轻量化候选池：每个 glass dict 只保留 _process_one_combo 实际用到的 6 个字段，
     # 减少子进程 pickle 流量约 3-4×（从 ~10 字段缩减到 6 字段）。
     def _slim_pool(pool):
@@ -364,22 +256,73 @@ def action_a(f_group, D, structure, apo,
         ]
     slim_pools = [_slim_pool(p) for p in candidate_pools]
 
+    # ── 胶合对预过滤：预计算所有满足工艺条件的胶合配对 ──
+    valid_cemented_pairs_map = {}  # {(ci,cj): [(glass_ci, glass_cj), ...]}
+    for ci, cj in actual_cemented:
+        valid_pairs = []
+        for gi_name, gi_props in slim_pools[ci]:
+            ni = gi_props['n_ref']
+            vi = gi_props['V_gen'] or gi_props['vd']
+            for gj_name, gj_props in slim_pools[cj]:
+                nj = gj_props['n_ref']
+                vj = gj_props['V_gen'] or gj_props['vd']
+                if abs(ni - nj) >= 0.08 and abs(vi - vj) >= 12:
+                    valid_pairs.append(((gi_name, gi_props), (gj_name, gj_props)))
+        valid_cemented_pairs_map[(ci, cj)] = valid_pairs
+        print(f"  胶合预过滤 ({ci},{cj}): {len(slim_pools[ci])}×{len(slim_pools[cj])} "
+              f"→ {len(valid_pairs)} 合法配对 "
+              f"({len(valid_pairs)/(len(slim_pools[ci])*len(slim_pools[cj]))*100:.1f}%)")
+
+    # 确定哪些片位受胶合约束，哪些是自由的
+    cemented_positions = set()
+    for ci, cj in actual_cemented:
+        cemented_positions.add(ci)
+        cemented_positions.add(cj)
+    free_positions = [i for i in range(N) if i not in cemented_positions]
+
+    # 更新 total_combos：自由片位 × 各胶合对合法配对数
+    total_combos = 1
+    for i in free_positions:
+        total_combos *= len(slim_pools[i])
+    for pair in actual_cemented:
+        total_combos *= len(valid_cemented_pairs_map[pair])
+    print(f"  开始穷举，共 {total_combos:,} 种玻璃组合...", flush=True)
+
     # [OPT-1] 构建参数生成器，将每个组合及其所需参数打包成元组
     # 注意：使用生成器而非列表，避免把所有组合预先加载到内存
+    # 重构：以胶合对为轴迭代，而非全片位笛卡尔积
     def combo_args_gen():
-        for combo in iterproduct(*[
-            [(name, g) for name, g in pool]
-            for pool in slim_pools          # [OPT-3] 改用轻量化池
-        ]):
-            yield (combo, structure, actual_cemented, allow_duplicate_glass,
-                   phi_total, apo, b_fit,
-                   scan_indices, free_indices, scan_grids,
-                   min_f_mm, max_f_mm,
-                   tol_disp, w_apo)
+        # 自由片位的候选池
+        free_pools_list = [slim_pools[i] for i in free_positions]
+        # 对自由片位做笛卡尔积（可能是空列表）
+        free_iter = list(iterproduct(*free_pools_list)) if free_pools_list else [()]
 
-    results   = []
-    n_combo   = 0
-    MAX_RESULTS_BUFFER = 100_000  # [FIX-7] 内存保护上限
+        for free_combo in free_iter:
+            # 对每个胶合对取预过滤后的合法配对，再做笛卡尔积
+            cemented_iters = [valid_cemented_pairs_map[pair] for pair in actual_cemented]
+            for cemented_combo in iterproduct(*cemented_iters):
+                # 组装完整的 N 元 combo（按片位索引顺序）
+                combo = [None] * N
+                # 填入自由片位
+                for pos_idx, glass in zip(free_positions, free_combo):
+                    combo[pos_idx] = glass
+                # 填入胶合片位
+                for (ci, cj), (glass_ci, glass_cj) in zip(actual_cemented, cemented_combo):
+                    combo[ci] = glass_ci
+                    combo[cj] = glass_cj
+                yield (tuple(combo), structure, actual_cemented, allow_duplicate_glass,
+                       phi_total, apo, b_fit,
+                       scan_indices, free_indices, scan_grids,
+                       min_f_mm, max_f_mm,
+                       tol_disp, w_apo, valid_cemented_pairs_map)
+
+    # ── 堆管理：只保留光学评分最优的有限结果 ──
+    # 用负号实现 max-heap（heapq 是最小堆），堆顶 = 最差的方案
+    MAX_RESULTS_KEEP = 50_000  # 最终保留的最大数量
+    results_heap = []           # 存储 (-opt_score, _counter, result_dict) 的堆
+    heap_threshold = float('inf')  # 当前堆中最差评分的阈值（初始全接受）
+    n_combo = 0
+    _heap_counter = 0   # 唯一序号，用于 score 相同时防止比较 dict
 
     # [OPT-1] 多进程并行穷举
     # chunksize=200 表示每次给一个工作进程分配 200 个组合，
@@ -399,20 +342,31 @@ def action_a(f_group, D, structure, apo,
 
             if n_combo % 500_000 == 0:
                 pct = n_combo / total_combos * 100
-                print(f"  进度：{pct:.1f}%  有效方案 {len(results)} 个",
+                print(f"  进度：{pct:.1f}%  有效方案 {len(results_heap)} 个",
                       flush=True)
 
-            results.extend(batch)
+            for item in batch:
+                score = item["opt_score"]
+                _heap_counter += 1
 
-            # [FIX-7] 超出缓冲上限时，保留光学评分最优的前50%
-            if len(results) >= MAX_RESULTS_BUFFER:
-                results.sort(key=lambda x: x["opt_score"])
-                results = results[:MAX_RESULTS_BUFFER // 2]
-                print(f"  [内存保护] 已裁剪至 {len(results)} 个方案",
-                      flush=True)
+                if len(results_heap) < MAX_RESULTS_KEEP:
+                    # 堆未满，直接插入（用 counter 防止 score 相同时比较 dict）
+                    heapq.heappush(results_heap, (-score, _heap_counter, item))
+                    if len(results_heap) == MAX_RESULTS_KEEP:
+                        # 刚满，更新阈值（堆顶元素 = 当前最差的）
+                        heap_threshold = -results_heap[0][0]
+                elif score < heap_threshold:
+                    # 堆已满，但新结果比当前最差的还要好 → 替换堆顶
+                    heapq.heapreplace(results_heap, (-score, _heap_counter, item))
+                    heap_threshold = -results_heap[0][0]  # 更新阈值
+                # else: 比最差的还差，直接丢弃（零开销）
 
     print(f"\n  搜索完成：共处理 {n_combo:,} 种组合，"
-          f"找到有效方案 {len(results)} 个")
+          f"找到有效方案 {len(results_heap)} 个")
+
+    # 提取最终结果并排序（opt_score 升序：越小越好）
+    results = [item for (_, _, item) in results_heap]
+    results.sort(key=lambda x: x["opt_score"])
 
     if not results:
         print(f"\n  未找到满足条件的方案。")
