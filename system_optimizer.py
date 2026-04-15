@@ -46,6 +46,7 @@ from seidel_gemini import (
     analyze_one_position,
 )
 from group_candidate import GroupCandidate, build_candidate_seq
+from zoom_utils import check_mechanical_gaps_feasible
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -98,6 +99,70 @@ def _compute_group_ranges(
         ranges.append((cum, cum + cand.n_surfaces))
         cum += cand.n_surfaces
     return ranges
+
+
+def _check_combo_mechanical_feasible(
+    candidates_combo: List[GroupCandidate],
+    zoom_positions: List[dict],
+    min_gap_mm: float = 2.0,
+) -> tuple[bool, float, float, float]:
+    """
+    检查系统组合在所有变焦位置的机械气隙是否均 >= min_gap_mm。
+
+    参数
+    ----
+    candidates_combo : List[GroupCandidate]
+        4 个组元的候选对象列表
+    zoom_positions : List[dict]
+        变焦位置列表，每项包含 'gap_values_mm'（薄透镜间距数组）
+    min_gap_mm : float
+        最小机械气隙要求
+
+    返回
+    ----
+    (feasible, min_d1, min_d2, min_d3)
+        feasible : 所有气隙均满足要求时为 True
+        min_d1/d2/d3 : 各气隙在所有变焦位置的最小值
+    """
+    n_groups = len(candidates_combo)
+    if n_groups < 4:
+        # 组数不足4组，无法进行完整主面修正校验；视为通过
+        return True, float('inf'), float('inf'), float('inf')
+
+    # ── 提取各组主面偏移 ─────────────────────────────────────
+    # struct_result 包含 'delta_H' 和 'delta_Hp'
+    delta_H_list = []
+    delta_Hp_list = []
+    for cand in candidates_combo:
+        sr = getattr(cand, 'struct_result', None)
+        if sr is None:
+            # 无结构计算结果，无法校验；视为通过
+            return True, float('inf'), float('inf'), float('inf')
+        delta_H_list.append(sr.get('delta_H', 0.0))
+        delta_Hp_list.append(sr.get('delta_Hp', 0.0))
+
+    # 赋值给各变量名（G1~G4）
+    delta_Hp_G1 = delta_Hp_list[0]
+    delta_H_G2  = delta_H_list[1]
+    delta_Hp_G2 = delta_Hp_list[1]
+    delta_H_G3  = delta_H_list[2]
+    delta_Hp_G3 = delta_Hp_list[2]
+    delta_H_G4  = delta_H_list[3]
+
+    # ── 提取各变焦位置的薄透镜间距 ─────────────────────────────
+    d1_thin_arr = np.array([zp['gap_values_mm'][0] for zp in zoom_positions])
+    d2_thin_arr = np.array([zp['gap_values_mm'][1] for zp in zoom_positions])
+    d3_thin_arr = np.array([zp['gap_values_mm'][2] for zp in zoom_positions])
+
+    # ── 调用统一校验函数 ─────────────────────────────────────
+    feasible, min_d1, min_d2, min_d3 = check_mechanical_gaps_feasible(
+        d1_thin_arr, d2_thin_arr, d3_thin_arr,
+        delta_Hp_G1, delta_H_G2,
+        delta_Hp_G2, delta_H_G3,
+        delta_Hp_G3, delta_H_G4,
+        min_gap_mm=min_gap_mm,
+    )
+    return feasible, min_d1, min_d2, min_d3
 
 
 def _stitch_group_seqs(
@@ -363,6 +428,18 @@ def find_best_combinations(
 
         for i, combo_tuple in enumerate(iterproduct(*all_group_candidates)):
             combo = list(combo_tuple)
+
+            # ── 步骤 A：机械气隙可行性预检 ─────────────────────────
+            feasible, min_d1, min_d2, min_d3 = _check_combo_mechanical_feasible(
+                combo, zoom_positions, min_gap_mm=2.0)
+            if not feasible:
+                # 打印淘汰信息（每 1000 个或首个淘汰案例）
+                if i < 10 or (i + 1) % 1000 == 0:
+                    print(f"  ⚠ 组合 #{i+1} 机械气隙不足"
+                          f"（min_d1={min_d1:.2f}, min_d2={min_d2:.2f}, min_d3={min_d3:.2f} mm），淘汰")
+                # 赋极大惩罚值，不加入结果列表
+                continue
+
             merit = system_merit_function(
                 combo, zoom_positions, stop_idx, d_mm_list, half_fov_rad, weights,
                 seq_cache=_seq_cache,
@@ -425,7 +502,18 @@ def find_best_combinations(
                 print(f"  最终层精确评分（{len(new_pool[:prune_m])} 个候选）...",
                       flush=True)
                 final_pool: List[Tuple[float, List[GroupCandidate]]] = []
+                skipped = 0
                 for fi, (_, combo) in enumerate(new_pool[:prune_m]):
+                    # ── 机械气隙可行性预检 ─────────────────────────────
+                    feasible, min_d1, min_d2, min_d3 = _check_combo_mechanical_feasible(
+                        combo, zoom_positions, min_gap_mm=2.0)
+                    if not feasible:
+                        skipped += 1
+                        if skipped <= 3:  # 仅打印前 3 条淘汰信息
+                            print(f"  ⚠ 候选 #{fi+1} 机械气隙不足"
+                                  f"（min_d1={min_d1:.2f}, min_d2={min_d2:.2f}, min_d3={min_d3:.2f} mm），跳过")
+                        continue
+
                     exact_merit = system_merit_function(
                         combo, zoom_positions, stop_idx, d_mm_list, half_fov_rad,
                         weights, seq_cache=_seq_cache,
@@ -433,6 +521,8 @@ def find_best_combinations(
                     final_pool.append((exact_merit, combo))
                     if (fi + 1) % max(1, prune_m // 5) == 0:
                         print(f"    精确评分进度：{fi+1}/{prune_m}", flush=True)
+                if skipped > 0:
+                    print(f"  （共跳过 {skipped} 个机械气隙不足的组合）")
                 active_pool = final_pool
 
         all_results = sorted(active_pool, key=lambda x: x[0])

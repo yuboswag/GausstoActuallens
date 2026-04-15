@@ -307,6 +307,50 @@ def load_zoom_configs_for_zemax(
     return zoom_configs
 
 
+def check_mechanical_gaps_feasible(
+    d1_thin_arr, d2_thin_arr, d3_thin_arr,
+    delta_Hp_G1, delta_H_G2,
+    delta_Hp_G2, delta_H_G3,
+    delta_Hp_G3, delta_H_G4,
+    min_gap_mm=2.0
+):
+    """
+    检查给定主平面修正量下，所有变焦位置的机械气隙是否均 >= min_gap_mm。
+
+    参数
+    ----
+    d1_thin_arr, d2_thin_arr, d3_thin_arr : array_like
+        各变焦位置的薄透镜间距（主面间距），单位 mm
+    delta_Hp_G1, delta_H_G2 : float
+        G1 后主面偏移、G2 前主面偏移
+    delta_Hp_G2, delta_H_G3 : float
+        G2 后主面偏移、G3 前主面偏移
+    delta_Hp_G3, delta_H_G4 : float
+        G3 后主面偏移、G4 前主面偏移
+    min_gap_mm : float
+        最小机械气隙要求，默认 2.0 mm
+
+    返回
+    ----
+    (feasible, min_d1, min_d2, min_d3)
+        feasible : bool，所有位置气隙均 >= min_gap_mm 时 True
+        min_d1/min_d2/min_d3 : 各气隙在所有位置中的最小值
+    """
+    d1_mech = d1_thin_arr + delta_Hp_G1 - delta_H_G2
+    d2_mech = d2_thin_arr + delta_Hp_G2 - delta_H_G3
+    d3_mech = d3_thin_arr + delta_Hp_G3 - delta_H_G4
+
+    min_d1 = float(np.min(d1_mech))
+    min_d2 = float(np.min(d2_mech))
+    min_d3 = float(np.min(d3_mech))
+
+    feasible = (min_d1 >= min_gap_mm and
+                min_d2 >= min_gap_mm and
+                min_d3 >= min_gap_mm)
+
+    return feasible, min_d1, min_d2, min_d3
+
+
 def correct_zoom_spacings(zoom_configs, group_principal_planes):
     """
     将高斯光学（薄透镜/主面间距）的变焦间距修正为物理面间距。
