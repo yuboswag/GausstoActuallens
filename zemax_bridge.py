@@ -420,145 +420,30 @@ class ZemaxBridge:
                 'is_stop':       bool(s.IsStop),
             })
 
-        efl = self._read_efl_via_mfe()
+        # 读取当前配置 EFL（使用 Cardinal Points Analysis）
+        try:
+            efls = self._read_efl_via_cardinal()
+            efl_val = efls[0] if efls else float('nan')
+        except Exception as e:
+            print(f"[警告] read_system_info 读取 EFL 失败: {e}")
+            efl_val = float('nan')
+
         return {
             'num_surfaces': num_surf,
             'surfaces':     surfaces,
-            'efl':          efl,
+            'efl':          efl_val,
         }
 
-    def _read_efl_via_mfe(self) -> float:
-        """
-        内部方法：向 MFE 末尾临时插入 EFFL 操作数，计算并读取 EFL，
-        然后删除该临时行。返回有效焦距 (mm)；失败时返回 float('nan')。
-
-        枚举路径（pythonnet）：
-          ZOSAPI.Editors.MFE.MeritOperandType.EFFL
-          ZOSAPI.Editors.MFE.MeritColumn.Param1
-        """
-        try:
-            ZOSAPI  = self._ZOSAPI
-            TheMFE  = self._system.MFE
-            n_rows  = TheMFE.NumberOfOperands
-            row     = n_rows + 1
-
-            TheMFE.InsertNewOperandAt(row)
-            op = TheMFE.GetOperandAt(row)
-            op.ChangeType(ZOSAPI.Editors.MFE.MeritOperandType.EFFL)
-            # Param1 = 0 表示主波长
-            op.GetOperandCell(
-                ZOSAPI.Editors.MFE.MeritColumn.Param1
-            ).IntegerValue = 0
-
-            TheMFE.CalculateMeritFunction()
-            efl = op.Value
-            TheMFE.RemoveOperandAt(row)
-            return float(efl)
-        except Exception:
-            return float('nan')
 
     def read_efl_from_cardinal(self, config: int = None) -> float:
         """
-        读取指定配置的实际 EFL（mm）。
-
-        参数
-        ----
-        config : int | None
-            配置序号（1-based）。None 时读取当前配置。
-
-        返回
-        ----
-        float: EFL 值；读取失败返回 None。
-
-        说明
-        ----
-        - 通过向 MFE 临时插入 EFFL 操作数的方式读取
-        - 自动切换 MCE 配置（若指定 config）
-        - 读取后清理临时插入的 MFE 行，不污染用户 MFE
+        [已弃用] 请使用 _read_efl_via_cardinal() 替代。
+        此方法错误地通过 MFE EFFL 操作数读取，在 extension 模式下不可靠。
         """
-        self._check_connected()
-        mce = self._system.MCE
-        mfe = self._system.MFE
-        n_configs = mce.NumberOfConfigurations
+        raise NotImplementedError(
+            "read_efl_from_cardinal 已弃用，请使用 _read_efl_via_cardinal()"
+        )
 
-        # 确定要读取的配置
-        if config is None:
-            cfg_idx = mce.CurrentConfiguration
-        else:
-            if not (1 <= config <= n_configs):
-                raise ValueError(f"config={config} 超出范围 [1, {n_configs}]")
-            cfg_idx = config
-            mce.SetCurrentConfiguration(cfg_idx)
-
-        # 原始 MFE 行数，用于后续清理
-        original_rows = mfe.NumberOfOperands
-
-        try:
-            # 插入 EFFL 操作数
-            new_op = mfe.AddOperand()
-            effl_type = self._ZOSAPI.Editors.MFE.MeritOperandType.EFFL
-            new_op.ChangeType(effl_type)
-            # Param1 = 0 表示主波长
-            new_op.GetOperandCell(
-                self._ZOSAPI.Editors.MFE.MeritColumn.Param1
-            ).IntegerValue = 0
-
-            mfe.CalculateMeritFunction()
-            efl_val = float(new_op.Value)
-
-            # 清理临时行
-            mfe.RemoveOperandAt(mfe.NumberOfOperands)
-            return efl_val
-        except Exception as e:
-            # 清理：删除可能的多余行
-            while mfe.NumberOfOperands > original_rows:
-                mfe.RemoveOperandAt(mfe.NumberOfOperands)
-            print(f"[警告] read_efl_from_cardinal(config={config}) 失败: {e}")
-            return None
-
-    def _read_effl_via_mfe(self) -> list:
-        """
-        逐配置切换 MCE，插入 EFFL 操作数，单次计算后按行号重取读值。
-        CalculateMeritFunction() 后操作数对象引用失效，必须重新 GetOperandAt。
-        """
-        mce = self._system.MCE
-        mfe = self._system.MFE
-        n_configs = mce.NumberOfConfigurations
-        effl_type  = self._ZOSAPI.Editors.MFE.MeritOperandType.EFFL
-        param1_col = self._ZOSAPI.Editors.MFE.MeritColumn.Param1
-        original_rows = mfe.NumberOfOperands
-        efls = []
-
-        try:
-            for cfg in range(1, n_configs + 1):
-                # 1. 切换到目标配置
-                mce.SetCurrentConfiguration(cfg)
-
-                # 2. 在 MFE 末尾插入 EFFL 操作数，记录行号
-                mfe.AddOperand()
-                row_idx = mfe.NumberOfOperands          # 插入后的行号
-                op = mfe.GetOperandAt(row_idx)
-                op.ChangeType(effl_type)
-                op.GetOperandCell(param1_col).IntegerValue = 0  # 主波长
-
-                # 3. 计算（此后 op 引用失效）
-                mfe.CalculateMeritFunction()
-
-                # 4. 必须重新按行号取操作数才能读到正确值
-                op_fresh = mfe.GetOperandAt(row_idx)
-                efl_val  = float(op_fresh.Value)
-                efls.append(round(efl_val, 4))
-
-                # 5. 立即清理临时行
-                mfe.RemoveOperandAt(row_idx)
-
-        except Exception as e:
-            # 清理所有多余行
-            while mfe.NumberOfOperands > original_rows:
-                mfe.RemoveOperandAt(mfe.NumberOfOperands)
-            raise RuntimeError(f'_read_effl_via_mfe 失败: {e}')
-
-        return efls
 
     def _read_efl_via_cardinal(self) -> list:
         """
@@ -647,6 +532,18 @@ class ZemaxBridge:
 
         return efls
 
+    def _read_effl_via_mfe(self) -> list:
+        """
+        [已弃用] MFE EFFL 操作数法读 EFL。
+        extension 模式下 CalculateMeritFunction() 会重置 CurrentConfiguration 到 1，
+        导致 Config 2~5 全部返回 Config 1 的 EFL。本函数保留仅作文档目的。
+        请使用 _read_efl_via_cardinal() 替代。
+        """
+        raise NotImplementedError(
+            "_read_effl_via_mfe 在 extension 模式下多配置不可靠，"
+            "请改用 _read_efl_via_cardinal()"
+        )
+
     def diagnose_system_validity(self) -> dict:
         """
         诊断当前 Zemax 系统是否物理可追迹。
@@ -701,9 +598,9 @@ class ZemaxBridge:
         except Exception as e:
             result['errors'].append(f'MCE 读取失败: {e}')
 
-        # 用 EFFL 操作数逐配置读 EFL
+        # 用 Cardinal Points Analysis 逐配置读 EFL
         try:
-            efls = self._read_effl_via_mfe()
+            efls = self._read_efl_via_cardinal()
             result['efl_per_config'] = efls
             result['ray_trace_ok'] = all(abs(v) > 0.1 for v in efls)
         except Exception as e:
@@ -721,12 +618,7 @@ class ZemaxBridge:
         返回：list，长度 = MCE 配置数，单位 mm。
         """
         self._check_connected()
-        try:
-            efls = self._read_efl_via_cardinal()
-        except Exception as e:
-            print(f'  [警告] Cardinal Points 读取失败: {e}')
-            print(f'  [回退] 使用 MFE EFFL 方式（已知对多配置不可靠）')
-            efls = self._read_effl_via_mfe()
+        efls = self._read_efl_via_cardinal()
 
         # 如果提供了 reference_efls，打印对比
         if reference_efls is not None and len(reference_efls) == len(efls):
