@@ -385,9 +385,14 @@ class ZemaxBridge:
     # 读取系统信息
     # -----------------------------------------------------------------------
 
-    def read_system_info(self) -> dict:
+    def read_system_info(self, read_efl: bool = False) -> dict:
         """
         读取当前系统的基本参数。
+
+        参数：
+          read_efl: 是否读取 EFL。默认 False（不读取，返回字典中 'efl' 为 None）。
+                    设 True 时会通过 Cardinal Points Analysis 读取当前配置的 EFL，
+                    开销较大（约 0.3 秒）。
 
         返回字典：
           {
@@ -402,7 +407,7 @@ class ZemaxBridge:
                 'is_stop': bool,
               }, ...
             ],
-            'efl': float,                 # 有效焦距 (mm)，通过 MFE EFFL 操作数获取
+            'efl': float | None,          # 有效焦距 (mm)，read_efl=False 时为 None
           }
         """
         self._check_connected()
@@ -420,13 +425,16 @@ class ZemaxBridge:
                 'is_stop':       bool(s.IsStop),
             })
 
-        # 读取当前配置 EFL（使用 Cardinal Points Analysis）
-        try:
-            efls = self._read_efl_via_cardinal()
-            efl_val = efls[0] if efls else float('nan')
-        except Exception as e:
-            print(f"[警告] read_system_info 读取 EFL 失败: {e}")
-            efl_val = float('nan')
+        # 可选读取当前配置 EFL（使用 Cardinal Points Analysis）
+        if read_efl:
+            try:
+                efls = self._read_efl_via_cardinal()
+                efl_val = efls[0] if efls else float('nan')
+            except Exception as e:
+                print(f"[警告] read_system_info 读取 EFL 失败: {e}")
+                efl_val = float('nan')
+        else:
+            efl_val = None
 
         return {
             'num_surfaces': num_surf,
@@ -544,16 +552,22 @@ class ZemaxBridge:
             "请改用 _read_efl_via_cardinal()"
         )
 
-    def diagnose_system_validity(self) -> dict:
+    def diagnose_system_validity(self, read_efl: bool = False) -> dict:
         """
         诊断当前 Zemax 系统是否物理可追迹。
+
+        参数：
+          read_efl: 是否读取各配置 EFL。默认 False（不读取，efl_per_config 为空列表，
+                    ray_trace_ok 将基于系统面数和 MCE 配置数做保守判断）。
+
         返回字典：{
-            'ray_trace_ok': bool,        # 近轴光线追迹是否成功
+            'ray_trace_ok': bool,        # read_efl=False 时：只要 LDE 和 MCE 读取成功即为 True
+                                        # read_efl=True 时：还要求所有配置 |EFL|>0.1
             'num_surfaces': int,         # LDE 面数
             'surface_summary': list,     # 每面 [index, radius, thickness, material]
             'mce_configs': int,          # MCE 配置数
             'mce_summary': list,         # 每行 MCE 操作数摘要
-            'efl_per_config': list,      # 每个配置的 EFFL
+            'efl_per_config': list,      # read_efl=False 时为空，True 时为各配置 EFL 列表
             'errors': list               # 错误信息列表
         }
         """
@@ -598,13 +612,22 @@ class ZemaxBridge:
         except Exception as e:
             result['errors'].append(f'MCE 读取失败: {e}')
 
-        # 用 Cardinal Points Analysis 逐配置读 EFL
-        try:
-            efls = self._read_efl_via_cardinal()
-            result['efl_per_config'] = efls
-            result['ray_trace_ok'] = all(abs(v) > 0.1 for v in efls)
-        except Exception as e:
-            result['errors'].append(f'EFFL 读取失败: {e}')
+        # 可选：用 Cardinal Points Analysis 逐配置读 EFL
+        if read_efl:
+            try:
+                efls = self._read_efl_via_cardinal()
+                result['efl_per_config'] = efls
+                result['ray_trace_ok'] = all(abs(v) > 0.1 for v in efls)
+            except Exception as e:
+                result['errors'].append(f'EFFL 读取失败: {e}')
+        else:
+            result['efl_per_config'] = []
+            # 保守判断：只要 LDE 和 MCE 读取成功且面数合理，就认为可追迹
+            result['ray_trace_ok'] = (
+                result['num_surfaces'] > 2
+                and result['mce_configs'] >= 1
+                and not result['errors']
+            )
 
         return result
 
