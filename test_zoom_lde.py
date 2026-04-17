@@ -202,6 +202,19 @@ def run_test():
 
     try:
         # ------------------------------------------------------------------ #
+        # 清理上一轮可能被污染的 zmx 文件
+        # ------------------------------------------------------------------ #
+        for fname in ['test_zoom_lde.zmx', 'test_zoom_lde.ZDA',
+                      'test_zoom_lde_corrected.zmx', 'test_zoom_lde_corrected.ZDA']:
+            fpath = os.path.join(os.path.dirname(os.path.abspath(__file__)), fname)
+            if os.path.exists(fpath):
+                try:
+                    os.remove(fpath)
+                    print(f"  [清理] 已删除旧文件: {fname}")
+                except Exception as e:
+                    print(f"  [警告] 无法删除 {fname}: {e}")
+
+        # ------------------------------------------------------------------ #
         # 步骤 1：连接 Zemax
         # ------------------------------------------------------------------ #
         step_header(1, "连接 Zemax（extension 模式）")
@@ -417,7 +430,8 @@ def run_test():
             print(f"    [警告] 诊断失败: {e}")
 
         # --- 5b: 读 EFL ---
-        print("\n  [5b] EFL 验证:")
+        print("\n  [5b] EFL 验证（Zemax 实际读取 via Cardinal Points Analysis）:")
+        print(f"    注意：若 EFL 与目标偏差 >50%，说明初始结构需要进一步优化")
         target_efls = target_efl_list
         try:
             efls = bridge.read_zoom_efl(reference_efls=target_efls)
@@ -435,9 +449,64 @@ def run_test():
             all_pass = False
 
         # ------------------------------------------------------------------ #
-        # 步骤 6：保存文件
+        #  步骤 5c: EFL 闭环迭代修正（在步骤 5 框架内）
         # ------------------------------------------------------------------ #
-        step_header(6, f"保存系统文件：{SAVE_PATH}")
+        print("\n  [5c] EFL 闭环迭代修正:")
+
+        # 直接使用脚本内存中的修正后间距（由 _load_all_from_json 计算得到）
+        # ZOOM_CONFIGS 格式：(name, efl, d1, d2, d3, epd)
+        try:
+            print(f"    使用 ZOOM_CONFIGS 中的修正后间距（{len(ZOOM_CONFIGS)} 个配置）")
+
+            # 提取各参数数组
+            d1_arr = [cfg[2] for cfg in ZOOM_CONFIGS]
+            d2_arr = [cfg[3] for cfg in ZOOM_CONFIGS]
+            d3_arr = [cfg[4] for cfg in ZOOM_CONFIGS]
+            target_efls = [cfg[1] for cfg in ZOOM_CONFIGS]
+            # cfg[5] 是 EPD（mm），F/# = EFL / EPD
+            f_numbers = [cfg[1] / cfg[5] for cfg in ZOOM_CONFIGS]
+
+            print(f"    配置名称: {[cfg[0] for cfg in ZOOM_CONFIGS]}")
+            print(f"    目标 EFL: {[f'{v:.3f}' for v in target_efls]}")
+            print(f"    初始 d2:  {[f'{v:.3f}' for v in d2_arr]}")
+            print(f"    F/#:       {[f'{v:.1f}' for v in f_numbers]}")
+
+            result = bridge.iterative_efl_correction(
+                target_efls=target_efls,
+                d1_arr=d1_arr,
+                d2_arr=d2_arr,
+                d3_arr=d3_arr,
+                f_numbers=f_numbers,
+                max_iter=15,
+                tol=0.02,
+                verbose=True,
+            )
+
+            if result['converged']:
+                print(f"  [ PASS ] EFL 收敛，迭代 {result['iterations']} 次")
+            else:
+                print(f"  [ WARN ] EFL 未完全收敛，最终误差：")
+                for i, (efl, err) in enumerate(
+                        zip(result['final_efls'], result['final_errors'])):
+                    print(f"    Config {i+1}: 实际={efl:.3f}mm  误差={err:+.1f}%")
+
+            # 保存收敛后的文件
+            corrected_save_path = os.path.join(
+                os.path.dirname(SAVE_PATH),
+                'test_zoom_lde_corrected.zmx'
+            )
+            bridge.save_file(corrected_save_path)
+            print(f"  已保存收敛后文件：{corrected_save_path}")
+
+        except Exception as e:
+            fail_msg(f"EFL 闭环修正失败：{e}")
+            traceback.print_exc()
+            all_pass = False
+
+        # ------------------------------------------------------------------ #
+        # 步骤 7：保存文件（原始测试文件）
+        # ------------------------------------------------------------------ #
+        step_header(7, f"保存原始系统文件：{SAVE_PATH}")
         try:
             bridge.save_file(SAVE_PATH)
             if os.path.exists(SAVE_PATH):
@@ -453,9 +522,9 @@ def run_test():
 
     finally:
         # ------------------------------------------------------------------ #
-        # 步骤 7：断开连接（无论是否出错都执行）
+        # 步骤 8：断开连接（无论是否出错都执行）
         # ------------------------------------------------------------------ #
-        step_header(7, "断开 Zemax 连接")
+        step_header(8, "断开 Zemax 连接")
         try:
             bridge.disconnect()
             pass_msg("已安全断开")

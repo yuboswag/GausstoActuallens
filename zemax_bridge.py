@@ -211,6 +211,41 @@ class ZemaxBridge:
         self._connected  = False
         print("[连接已断开]")
 
+    def diagnose_analyses_api(self):
+        """
+        探测 I_Analyses 对象上所有可用方法，打印含 'Cardinal'/'cardinal'/'EFL'/'efl'
+        或 'New_' 前缀的方法名，用于确认 Cardinal Points 分析的正确 API 入口。
+        """
+        self._check_connected()
+        analyses = self._system.Analyses
+        all_attrs = dir(analyses)
+        print("\n[diagnose_analyses_api] I_Analyses 全部属性/方法:")
+
+        # 先打印含关键词的
+        keywords = ['cardinal', 'efl', 'focal', 'new_']
+        print("\n  含关键词的方法（cardinal/efl/focal/new_）:")
+        for attr in sorted(all_attrs):
+            if any(kw in attr.lower() for kw in keywords):
+                print(f"    {attr}")
+
+        # 再打印全部 New_ 开头的
+        print("\n  所有 New_ 开头的方法:")
+        for attr in sorted(all_attrs):
+            if attr.startswith('New_') or attr.startswith('new_'):
+                print(f"    {attr}")
+
+        # 打印全部方法总数
+        print(f"\n  I_Analyses 总属性数: {len(all_attrs)}")
+
+        # 尝试用 AnalysisIDM 枚举方式
+        print("\n  尝试 AnalysisIDM 枚举方式:")
+        try:
+            id_enum = self._ZOSAPI.Analysis.AnalysisIDM
+            id_attrs = [a for a in dir(id_enum) if 'ardinal' in a or 'ardinal' in a.lower()]
+            print(f"    AnalysisIDM 含 Cardinal 的枚举值: {id_attrs}")
+        except Exception as e:
+            print(f"    AnalysisIDM 访问失败: {e}")
+
     def __enter__(self):
         return self
 
@@ -422,50 +457,193 @@ class ZemaxBridge:
         except Exception:
             return float('nan')
 
-    def _read_effl_via_mfe(self) -> list:
+    def read_efl_from_cardinal(self, config: int = None) -> float:
         """
-        通过在 MFE 中插入 EFFL 操作数读取各变焦配置的 EFL。
-        返回列表，长度 = MCE 配置数，单位 mm。
-        注意：此方法会临时修改 MFE，读完后清除插入的行。
-        """
-        mce = self._system.MCE
-        n_configs = mce.NumberOfConfigurations
-        mfe = self._system.MFE
-        efls = []
+        读取指定配置的实际 EFL（mm）。
 
-        # 记录当前 MFE 行数，之后恢复
+        参数
+        ----
+        config : int | None
+            配置序号（1-based）。None 时读取当前配置。
+
+        返回
+        ----
+        float: EFL 值；读取失败返回 None。
+
+        说明
+        ----
+        - 通过向 MFE 临时插入 EFFL 操作数的方式读取
+        - 自动切换 MCE 配置（若指定 config）
+        - 读取后清理临时插入的 MFE 行，不污染用户 MFE
+        """
+        self._check_connected()
+        mce = self._system.MCE
+        mfe = self._system.MFE
+        n_configs = mce.NumberOfConfigurations
+
+        # 确定要读取的配置
+        if config is None:
+            cfg_idx = mce.CurrentConfiguration
+        else:
+            if not (1 <= config <= n_configs):
+                raise ValueError(f"config={config} 超出范围 [1, {n_configs}]")
+            cfg_idx = config
+            mce.SetCurrentConfiguration(cfg_idx)
+
+        # 原始 MFE 行数，用于后续清理
         original_rows = mfe.NumberOfOperands
 
         try:
-            for cfg_idx in range(1, n_configs + 1):
-                # 切换到目标配置
-                mce.SetCurrentConfiguration(cfg_idx)
+            # 插入 EFFL 操作数
+            new_op = mfe.AddOperand()
+            effl_type = self._ZOSAPI.Editors.MFE.MeritOperandType.EFFL
+            new_op.ChangeType(effl_type)
+            # Param1 = 0 表示主波长
+            new_op.GetOperandCell(
+                self._ZOSAPI.Editors.MFE.MeritColumn.Param1
+            ).IntegerValue = 0
 
-                # 在 MFE 末尾插入 EFFL 操作数
-                new_op = mfe.AddOperand()
-                # 获取 EFFL 枚举类型
-                effl_type = self._ZOSAPI.Editors.MFE.MeritOperandType.EFFL
-                new_op.ChangeType(effl_type)
-                # Param1 = 波长序号，0 = 主波长
-                new_op.GetOperandCell(
-                    self._ZOSAPI.Editors.MFE.MeritColumn.Param1
-                ).IntegerValue = 0
+            mfe.CalculateMeritFunction()
+            efl_val = float(new_op.Value)
 
-                # 触发计算
+            # 清理临时行
+            mfe.RemoveOperandAt(mfe.NumberOfOperands)
+            return efl_val
+        except Exception as e:
+            # 清理：删除可能的多余行
+            while mfe.NumberOfOperands > original_rows:
+                mfe.RemoveOperandAt(mfe.NumberOfOperands)
+            print(f"[警告] read_efl_from_cardinal(config={config}) 失败: {e}")
+            return None
+
+    def _read_effl_via_mfe(self) -> list:
+        """
+        逐配置切换 MCE，插入 EFFL 操作数，单次计算后按行号重取读值。
+        CalculateMeritFunction() 后操作数对象引用失效，必须重新 GetOperandAt。
+        """
+        mce = self._system.MCE
+        mfe = self._system.MFE
+        n_configs = mce.NumberOfConfigurations
+        effl_type  = self._ZOSAPI.Editors.MFE.MeritOperandType.EFFL
+        param1_col = self._ZOSAPI.Editors.MFE.MeritColumn.Param1
+        original_rows = mfe.NumberOfOperands
+        efls = []
+
+        try:
+            for cfg in range(1, n_configs + 1):
+                # 1. 切换到目标配置
+                mce.SetCurrentConfiguration(cfg)
+
+                # 2. 在 MFE 末尾插入 EFFL 操作数，记录行号
+                mfe.AddOperand()
+                row_idx = mfe.NumberOfOperands          # 插入后的行号
+                op = mfe.GetOperandAt(row_idx)
+                op.ChangeType(effl_type)
+                op.GetOperandCell(param1_col).IntegerValue = 0  # 主波长
+
+                # 3. 计算（此后 op 引用失效）
                 mfe.CalculateMeritFunction()
 
-                # 读取 Value
-                efl_val = new_op.Value
+                # 4. 必须重新按行号取操作数才能读到正确值
+                op_fresh = mfe.GetOperandAt(row_idx)
+                efl_val  = float(op_fresh.Value)
                 efls.append(round(efl_val, 4))
 
-                # 删除刚插入的行（保持 MFE 干净）
-                mfe.RemoveOperandAt(mfe.NumberOfOperands)
+                # 5. 立即清理临时行
+                mfe.RemoveOperandAt(row_idx)
 
         except Exception as e:
-            # 清理：删除所有多余行
+            # 清理所有多余行
             while mfe.NumberOfOperands > original_rows:
                 mfe.RemoveOperandAt(mfe.NumberOfOperands)
             raise RuntimeError(f'_read_effl_via_mfe 失败: {e}')
+
+        return efls
+
+    def _read_efl_via_cardinal(self) -> list:
+        """
+        通过 Cardinal Points Analysis 逐配置读取 EFL（mm）。
+        ZOS-API 2024 R1 正确调用路径：
+          Analyses.New_Analysis(AnalysisIDM.CardinalPoints)
+        """
+        import tempfile, os, time
+        mce = self._system.MCE
+        n_configs = mce.NumberOfConfigurations
+        analysis_id = self._ZOSAPI.Analysis.AnalysisIDM.CardinalPoints
+        efls = []
+
+        for cfg in range(1, n_configs + 1):
+            mce.SetCurrentConfiguration(cfg)
+
+            analysis = self._system.Analyses.New_Analysis(analysis_id)
+            try:
+                analysis.ApplyAndWaitForCompletion()
+
+                # 用 NamedTemporaryFile 生成可靠路径（关闭后文件仍留存）
+                with tempfile.NamedTemporaryFile(
+                    mode='w', suffix='.txt', delete=False
+                ) as tf:
+                    tmp_path = tf.name
+
+                # 重试循环：最多 5 次，指数退避
+                results = analysis.GetResults()
+                content = None
+                for attempt in range(5):
+                    try:
+                        results.GetTextFile(tmp_path)
+                    except Exception as e:
+                        print(f'    [重试 {attempt+1}] GetTextFile 异常: {e}')
+
+                    if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 100:
+                        try:
+                            with open(tmp_path, 'r', encoding='utf-16-le',
+                                      errors='replace') as f:
+                                content = f.read()
+                            if '焦长' in content or 'Effective' in content:
+                                break  # 成功读到有效内容
+                        except Exception as e:
+                            print(f'    [重试 {attempt+1}] 读取异常: {e}')
+
+                    if attempt < 4:  # 最后一次不用等
+                        time.sleep(0.1 * (2 ** attempt))
+
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+
+                if content is None:
+                    raise RuntimeError(
+                        f'Config {cfg} Cardinal Points 5 次重试后仍失败'
+                    )
+            finally:
+                try:
+                    analysis.Close()
+                except Exception:
+                    pass
+
+            # 解析含"焦长"的行
+            efl = None
+            for line in content.splitlines():
+                if '焦长' in line or 'Effective Focal Length' in line:
+                    parts = line.split(':')
+                    if len(parts) >= 2:
+                        nums = parts[1].split()
+                        if nums:
+                            try:
+                                efl = abs(float(nums[-1]))
+                                break
+                            except ValueError:
+                                continue
+
+            if efl is None or efl < 0.1:
+                raise RuntimeError(
+                    f'无法从 Config {cfg} Cardinal 报告解析 EFL，'
+                    f'报告前 400 字符：{content[:400]}'
+                )
+
+            efls.append(round(efl, 4))
+            print(f'    [cardinal] Config {cfg}: EFL={efl:.4f} mm')
 
         return efls
 
@@ -535,25 +713,29 @@ class ZemaxBridge:
 
     def read_zoom_efl(self, reference_efls: list = None) -> list:
         """
-        读取各变焦配置的 EFL（mm）。
+        读取各变焦配置的 Zemax 实际 EFL（mm）。
 
-        优先使用传入的 reference_efls（来自高斯解，作为参考值）。
-        若未传入，尝试通过 MFE EFFL 操作数读取（可能不准确）。
-
-        注意：ZOS-API 2024 R1 extension 模式下无可靠的 EFL 直读 API，
-        精确 EFL 验证请在 Zemax 中手动运行 Analysis > Cardinal Points。
+        优先通过 Cardinal Points Analysis 真正从 Zemax 读取。
+        reference_efls 仅用于日志对比，不再作为返回值。
 
         返回：list，长度 = MCE 配置数，单位 mm。
         """
-        if reference_efls is not None:
-            return list(reference_efls)
-
-        # 备用：MFE EFFL（仅对 Config 1 有效，其余配置值相同为已知限制）
+        self._check_connected()
         try:
-            efls = self._read_effl_via_mfe()
-            return efls
+            efls = self._read_efl_via_cardinal()
         except Exception as e:
-            raise RuntimeError(f'read_zoom_efl 失败: {e}')
+            print(f'  [警告] Cardinal Points 读取失败: {e}')
+            print(f'  [回退] 使用 MFE EFFL 方式（已知对多配置不可靠）')
+            efls = self._read_effl_via_mfe()
+
+        # 如果提供了 reference_efls，打印对比
+        if reference_efls is not None and len(reference_efls) == len(efls):
+            print('  --- EFL 对比（Zemax 实际 vs 目标）---')
+            for i, (actual, target) in enumerate(zip(efls, reference_efls)):
+                err = (actual - target) / target * 100 if target != 0 else 0
+                print(f'    Config {i+1}: Zemax={actual:.3f} mm, 目标={target:.3f} mm, 误差={err:+.1f}%')
+
+        return efls
 
     # -----------------------------------------------------------------------
     # RMS Spot Size（真实光线追迹）
@@ -1139,6 +1321,143 @@ class ZemaxBridge:
             })
 
         return results
+
+    # -----------------------------------------------------------------------
+    # EFL 闭环迭代修正
+    # -----------------------------------------------------------------------
+
+    def iterative_efl_correction(
+        self,
+        target_efls: list[float],
+        d1_arr: list[float],
+        d2_arr: list[float],
+        d3_arr: list[float],
+        f_numbers: list[float],
+        max_iter: int = 15,
+        tol: float = 0.02,
+        verbose: bool = True,
+    ) -> dict:
+        """
+        迭代调整组间间距，使 Zemax 实际 EFL 收敛到目标值。
+
+        策略：
+        - 广角端和长焦端的 EFL 误差分别调整 d2[0]（广角端）
+          和 d2[-1]（长焦端），其余配置按比例插值
+        - d1 和 d3 保持不变（对 EFL 不敏感，只影响像差）
+        - 每轮迭代后重新写入 MCE 并读取实际 EFL
+        - 收敛条件：所有配置 EFL 误差均 < tol（默认 2%）
+
+        参数
+        ----
+        target_efls  : 5 个配置的目标 EFL（mm）
+        d1_arr       : 5 个配置的 d1（G1-G2 间距，mm），固定不变
+        d2_arr       : 5 个配置的 d2（G2-G3 间距，mm），迭代调整
+        d3_arr       : 5 个配置的 d3（G3-G4 间距，mm），固定不变
+        f_numbers    : 5 个配置的像方 F/#
+        max_iter     : 最大迭代次数，默认 15
+        tol          : EFL 收敛容差（相对误差），默认 0.02 = 2%
+        verbose      : 是否打印每轮迭代详情
+
+        返回
+        ----
+        dict:
+            'converged': bool       是否收敛
+            'iterations': int       实际迭代次数
+            'final_efls': list      最终实际 EFL
+            'final_errors': list    最终 EFL 相对误差（%）
+            'final_d2': list        收敛后的 d2 值
+        """
+        self._check_connected()
+
+        d2 = list(d2_arr)  # 工作副本，迭代中修改
+        n_configs = len(target_efls)
+        TheSystem = self._system
+        TheMCE = TheSystem.MCE
+
+        # 自适应阻尼初始化
+        damping = 0.5
+        prev_max_err = float('inf')
+
+        for iteration in range(max_iter):
+
+            # ── 写入当前 d2 到 MCE ──────────────────────────────
+            # 只更新 MCE 中 d2 对应的行（THIC Surface 14）
+            for row_idx in range(1, TheMCE.NumberOfOperands + 1):
+                operand = TheMCE.GetOperandAt(row_idx)
+                if (operand.Type == self._ZOSAPI.Editors.MCE.MultiConfigOperandType.THIC
+                        and operand.Param1 == 14):
+                    for cfg in range(1, n_configs + 1):
+                        cell = operand.GetOperandCell(cfg)
+                        cell.DoubleValue = d2[cfg - 1]
+                    break
+
+            # ── 读取实际 EFL（逐配置 Cardinal Points Analysis）──────
+            # extension 模式下 CalculateMeritFunction 会重置配置到 Config 1，
+            # 必须用 Cardinal Points Analysis 文件输出方式逐配置读取
+            actual_efls_raw = self._read_efl_via_cardinal()
+            actual_efls = [
+                v if (v is not None and not (v != v))  # 过滤 None 和 NaN
+                else target_efls[i]
+                for i, v in enumerate(actual_efls_raw)
+            ]
+
+            # ── 计算误差 ──────────────────────────────────────────
+            errors = [(a - t) / t for a, t in zip(actual_efls, target_efls)]
+            max_err = max(abs(e) for e in errors)
+
+            if verbose:
+                print(f"  迭代 {iteration+1:2d} 当前 d2: "
+                      f"[{', '.join(f'{v:.2f}' for v in d2)}]")
+                print(f"  迭代 {iteration+1:2d}: "
+                      f"EFL=[{', '.join(f'{e:.2f}' for e in actual_efls)}] "
+                      f"误差=[{', '.join(f'{e*100:+.1f}%' for e in errors)}] "
+                      f"最大误差={max_err*100:.1f}% 阻尼={damping:.3f}")
+
+            # ── 自适应阻尼：发散检测 ─────────────────────────────
+            if max_err > prev_max_err * 1.05:
+                damping *= 0.5
+                damping = max(0.05, damping)
+                if verbose:
+                    print(f"  ⚠ 检测到发散，阻尼降为 {damping:.3f}")
+            else:
+                # 收敛趋势下逐渐恢复阻尼
+                damping = min(0.5, damping * 1.1)
+            prev_max_err = max_err
+
+            # ── 收敛判断 ──────────────────────────────────────────
+            if max_err < tol:
+                if verbose:
+                    print(f"  ✅ 收敛！迭代 {iteration+1} 次，最大误差 {max_err*100:.2f}%")
+                return {
+                    'converged': True,
+                    'iterations': iteration + 1,
+                    'final_efls': actual_efls,
+                    'final_errors': [e * 100 for e in errors],
+                    'final_d2': d2,
+                }
+
+            # ── 调整 d2（带步长限制和最小下限）────────────────────
+            # 正补偿型变焦：d2 减小 → EFL 增大（反相关）
+            #   errors[i] < 0（实际 EFL < 目标）→ 需增大 EFL → d2 减小 → correction < 0
+            #   errors[i] > 0（实际 EFL > 目标）→ 需减小 EFL → d2 增大 → correction > 0
+            for i in range(n_configs):
+                correction = errors[i] * damping * d2[i]
+                # 限制单步最大修正量
+                max_step = 0.30 * abs(d2[i])
+                correction = max(-max_step, min(max_step, correction))
+                # 允许小间距：最低 2.0 mm（避免卡死在 5.0）
+                d2[i] = max(2.0, d2[i] + correction)
+
+        # 未收敛
+        if verbose:
+            print(f"  ⚠ 达到最大迭代次数 {max_iter}，未完全收敛")
+        return {
+            'converged': False,
+            'iterations': max_iter,
+            'final_efls': actual_efls,
+            'final_errors': [e * 100 for e in errors],
+            'final_d2': d2,
+        }
 
     # -----------------------------------------------------------------------
     # 局部优化
