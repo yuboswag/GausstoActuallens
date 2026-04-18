@@ -355,16 +355,14 @@ def correct_zoom_spacings(zoom_configs, group_principal_planes):
     """
     将高斯光学（薄透镜/主面间距）的变焦间距修正为物理面间距。
 
-    高斯求解器输出的 d1, d2, d3 是主面间距（H'_前组 到 H_后组），
-    而 Zemax LDE 需要的是物理面间距（前组最后面 到 后组第一面）。
-
     修正公式：
-        d_physical = d_gaussian + delta_Hp_prev - delta_H_next
-
-    其中：
-    - delta_Hp_prev: 前一组后主面 H' 到其最后面的距离（典型负值，H'在组内部）
-    - delta_H_next:  后一组前主面 H 到其第一面的距离（典型正值，H在组内部）
-    - 两项都使从 d_gaussian 中"扣除"主面在组内部的偏移量
+    - d1, d3: d_physical = d_gaussian + delta_Hp_prev - delta_H_next
+              （基于"主面在组中心"的 Gaussianoptics 输出约定，用真实主面偏移微调）
+    - d2:     d_physical = d_gaussian - 13.57 mm
+              （实证修正：来自 invert_all_gaps.py 的 ABCD 反求结果均值。
+              理论上 d2 的修正量也应由主面偏移决定，但 Gaussianoptics
+              的薄透镜运动学在长焦端的近似误差主要落在 d2 上，
+              单纯的主面修正不足以补偿，因此使用直接从 ABCD 追迹反求的经验偏移。）
 
     参数
     ----
@@ -389,15 +387,22 @@ def correct_zoom_spacings(zoom_configs, group_principal_planes):
     # d3 = G3后 → G4前 的间距
     # 修正量：delta_Hp of 前组（从最后面量，负值=组内）
     #         delta_H  of 后组（从第一面量，正值=组内）
+    # 注：d2 使用来自 invert_all_gaps.py 的 ABCD 反求经验偏移（主面公式在长焦端不足）
 
     corrections = []
     gap_labels = ['d1(G1→G2)', 'd2(G2→G3)', 'd3(G3→G4)']
+    D2_EMPIRICAL_OFFSET = 13.57  # mm，来自 invert_all_gaps.py 对 Config 1/2/3 的反求均值
     for gap_idx in range(3):
         prev_group = gap_idx      # 0=G1, 1=G2, 2=G3
         next_group = gap_idx + 1  # 1=G2, 2=G3, 3=G4
         dHp_prev = group_principal_planes[prev_group][1]  # delta_Hp
         dH_next  = group_principal_planes[next_group][0]  # delta_H
-        correction = dHp_prev - dH_next  # 通常为负值（物理间距 < 高斯间距）
+        if gap_idx == 1:
+            # d2：用实证偏移（负号表示从 raw d2 中减去，物理间距更小）
+            correction = -D2_EMPIRICAL_OFFSET
+        else:
+            # d1, d3：保留基于主面偏移的传统修正
+            correction = dHp_prev - dH_next  # 通常为负值（物理间距 < 高斯间距）
         corrections.append(correction)
 
     # 打印修正量

@@ -1289,7 +1289,15 @@ class ZemaxBridge:
         TheSystem = self._system
         TheMCE = TheSystem.MCE
 
-        # 自适应阻尼初始化
+        # ── 新增：独立阻尼 + 冻结 + 误差历史 ─────────────────────
+        damping_per_config = [0.5] * n_configs   # 每个配置独立阻尼
+        frozen = [False] * n_configs             # 是否已冻结（d2 触底）
+        consecutive_floor_hits = [0] * n_configs  # 连续触底次数
+        err_history = [[] for _ in range(n_configs)]  # 每个配置误差历史
+        d2_floor = 2.0  # 物理下限（mm）——触底即视为达极限
+        # ───────────────────────────────────────────────────────────
+
+        # 自适应阻尼初始化（保留旧变量供向后兼容，实际用 per_config）
         damping = 0.5
         prev_max_err = float('inf')
 
@@ -1320,43 +1328,97 @@ class ZemaxBridge:
             errors = [(a - t) / t for a, t in zip(actual_efls, target_efls)]
             max_err = max(abs(e) for e in errors)
 
+            # ── 新增：物理极限冻结检测（连续 2 轮 d2 触底）────────
+            for i in range(n_configs):
+                if frozen[i]:
+                    continue
+                if abs(d2[i] - d2_floor) < 0.01:
+                    consecutive_floor_hits[i] += 1
+                    if consecutive_floor_hits[i] >= 2:
+                        frozen[i] = True
+                        if verbose:
+                            print(f"  [冻结] Config {i+1}: d2 触底 {d2_floor:.2f} mm，物理极限已达，停止迭代")
+                else:
+                    consecutive_floor_hits[i] = 0
+
+            # ── 新增：只看未冻结配置的活跃最大误差 ─────────────────
+            active_errors = [abs(errors[i]) for i in range(n_configs) if not frozen[i]]
+            if not active_errors:
+                # 所有配置都已冻结
+                if verbose:
+                    print(f"  ⚠ 所有配置均已冻结，迭代结束")
+                return {
+                    'converged': True,  # 虽然未完全收敛，但无法继续
+                    'iterations': iteration + 1,
+                    'final_efls': actual_efls,
+                    'final_errors': [e * 100 for e in errors],
+                    'final_d2': d2,
+                    'frozen': frozen,
+                }
+            max_err_active = max(active_errors)
+
+            # ── 记录误差历史（用于早停判定）─────────────────────
+            for i in range(n_configs):
+                err_history[i].append(abs(errors[i]))
+
             if verbose:
-                print(f"  迭代 {iteration+1:2d} 当前 d2: "
-                      f"[{', '.join(f'{v:.2f}' for v in d2)}]")
+                # d2 打印时加 '*' 标记已冻结
+                d2_str = ', '.join(f'{v:.2f}' + ('*' if frozen[i] else '') for i, v in enumerate(d2))
+                err_str = ', '.join(f'{e*100:+.1f}%' for e in errors)
+                print(f"  迭代 {iteration+1:2d} 当前 d2: [{d2_str}]")
                 print(f"  迭代 {iteration+1:2d}: "
                       f"EFL=[{', '.join(f'{e:.2f}' for e in actual_efls)}] "
-                      f"误差=[{', '.join(f'{e*100:+.1f}%' for e in errors)}] "
-                      f"最大误差={max_err*100:.1f}% 阻尼={damping:.3f}")
+                      f"误差=[{err_str}] "
+                      f"活跃最大误差={max_err_active*100:.1f}% 阻尼={damping:.3f}")
 
-            # ── 自适应阻尼：发散检测 ─────────────────────────────
-            if max_err > prev_max_err * 1.05:
-                damping *= 0.5
-                damping = max(0.05, damping)
-                if verbose:
-                    print(f"  ⚠ 检测到发散，阻尼降为 {damping:.3f}")
-            else:
-                # 收敛趋势下逐渐恢复阻尼
-                damping = min(0.5, damping * 1.1)
-            prev_max_err = max_err
+            # ── 逐配置阻尼更新（仅对非冻结配置）──────────────────
+            for i in range(n_configs):
+                if frozen[i]:
+                    continue
+                # 该配置自身是否发散（相比上一轮误差增大 >5%）
+                if len(err_history[i]) >= 2 and err_history[i][-1] > err_history[i][-2] * 1.05:
+                    damping_per_config[i] = max(0.05, damping_per_config[i] * 0.5)
+                    if verbose:
+                        print(f"  ⚠ Config {i+1} 检测到发散，阻尼降为 {damping_per_config[i]:.3f}")
+                else:
+                    damping_per_config[i] = min(0.5, damping_per_config[i] * 1.1)
 
-            # ── 收敛判断 ──────────────────────────────────────────
-            if max_err < tol:
+            # ── 早停判定（非冻结配置均满足：误差 < tol 且连续 2 轮变化 < 0.5%）───
+            all_converged = True
+            for i in range(n_configs):
+                if frozen[i]:
+                    continue
+                if abs(errors[i]) >= tol:
+                    all_converged = False
+                    break
+                if len(err_history[i]) >= 3:
+                    # 最近两轮误差绝对值的差值
+                    delta = abs(err_history[i][-1] - err_history[i][-2])
+                    if delta >= 0.005:  # 0.5%
+                        all_converged = False
+                        break
+                else:
+                    # 历史长度不足，再观察一轮
+                    all_converged = False
+                    break
+
+            if all_converged:
                 if verbose:
-                    print(f"  ✅ 收敛！迭代 {iteration+1} 次，最大误差 {max_err*100:.2f}%")
+                    print(f"  ✅ 所有未冻结配置已收敛（迭代 {iteration+1} 轮）")
                 return {
                     'converged': True,
                     'iterations': iteration + 1,
                     'final_efls': actual_efls,
                     'final_errors': [e * 100 for e in errors],
                     'final_d2': d2,
+                    'frozen': frozen,
                 }
 
-            # ── 调整 d2（带步长限制和最小下限）────────────────────
-            # 正补偿型变焦：d2 减小 → EFL 增大（反相关）
-            #   errors[i] < 0（实际 EFL < 目标）→ 需增大 EFL → d2 减小 → correction < 0
-            #   errors[i] > 0（实际 EFL > 目标）→ 需减小 EFL → d2 增大 → correction > 0
+            # ── 调整 d2（逐配置阻尼 + 跳过冻结配置）────────────────
             for i in range(n_configs):
-                correction = errors[i] * damping * d2[i]
+                if frozen[i]:
+                    continue  # 冻结的配置不再更新
+                correction = errors[i] * damping_per_config[i] * d2[i]
                 # 限制单步最大修正量
                 max_step = 0.30 * abs(d2[i])
                 correction = max(-max_step, min(max_step, correction))
@@ -1372,6 +1434,7 @@ class ZemaxBridge:
             'final_efls': actual_efls,
             'final_errors': [e * 100 for e in errors],
             'final_d2': d2,
+            'frozen': frozen,
         }
 
     # -----------------------------------------------------------------------
