@@ -147,8 +147,8 @@ def compute_principal_planes(surfaces_data, thicknesses_data, nd_values_dict,
         return 0.0, 0.0
 
     Phi_sys = -C  # 系统光焦度 (mm^-1)
-    delta_H = (1.0 - D) / C      # 前主面到第一面的距离（mm）
-    delta_Hp = (A - 1.0) / C     # 后主面到最后面的距离（mm，正值=向右=组外）
+    delta_H = (D - 1.0) / C      # 前主面到第一面的距离（mm）
+    delta_Hp = (1.0 - A) / C     # 后主面到最后面的距离（mm，正值=向右=组外）
 
     # ── 步骤4：打印诊断信息 ───────────────────────────────────────
     efl = -1.0 / C if abs(C) > 1e-12 else float('inf')

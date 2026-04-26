@@ -353,6 +353,29 @@ def check_mechanical_gaps_feasible(
 
 def correct_zoom_spacings(zoom_configs, group_principal_planes):
     """
+    [2026-04 起废弃] Gaussianoptics 已直接输出物理顶点间距，无需主面修正。
+
+    经实验证实（test_bridge.py + Zemax Cardinal Points 读 EFL）：
+      - raw d 直接写入 Zemax → 短焦/中短焦端 EFL 偏差 < 1%
+      - 中焦偏 5%，中长焦偏 18%，长焦偏 37%
+      - 长焦端偏差是薄组近似失效的固有局限，不是修正问题
+      - 加任何形式的主面修正都会让结果变差
+
+    保留函数签名以兼容 main.py / test_bridge.py 现有调用，
+    内部直接返回 zoom_configs 副本。
+
+    主面值 (delta_H / delta_Hp) 由 structure.py 计算，仍可用于：
+      - 赛德尔系数分析（seidel_gemini.py）
+      - 后焦距精修（zemax_bridge.py BFD 重计算阶段）
+      - 诊断和可视化
+    但不再用于修正变焦组间距。
+    """
+    print("\n[correct_zoom_spacings] 主面修正已禁用（NOOP），直接返回 raw 间距")
+    return list(zoom_configs)
+
+
+def _correct_zoom_spacings_legacy(zoom_configs, group_principal_planes):
+    """
     将高斯光学（薄透镜/主面间距）的变焦间距修正为物理面间距。
 
     修正公式：
@@ -391,18 +414,19 @@ def correct_zoom_spacings(zoom_configs, group_principal_planes):
 
     corrections = []
     gap_labels = ['d1(G1→G2)', 'd2(G2→G3)', 'd3(G3→G4)']
-    D2_EMPIRICAL_OFFSET = 13.57  # mm，来自 invert_all_gaps.py 对 Config 1/2/3 的反求均值
+    # 统一使用主面偏移修正公式：correction = delta_Hp_prev - delta_H_next
+    # 历史上 d2 曾使用硬编码经验偏移 D2_EMPIRICAL_OFFSET=13.57mm（来自
+    # invert_all_gaps.py 在 ABCD_SCALE=0.95 前提下对 Config 1/2/3 的反求均值），
+    # 但该偏移在长焦端会把 d2 压至负值，使 Zemax 接收到物理不合理的几何，
+    # 污染下游的光线追迹与 Seidel 像差诊断。现统一回主面修正公式。
+    # 若启用后发现 EFL 系统性偏离目标，应当交由 Zemax 优化器纠正，而非在
+    # 写入前用经验偏移硬补。
     for gap_idx in range(3):
         prev_group = gap_idx      # 0=G1, 1=G2, 2=G3
         next_group = gap_idx + 1  # 1=G2, 2=G3, 3=G4
         dHp_prev = group_principal_planes[prev_group][1]  # delta_Hp
         dH_next  = group_principal_planes[next_group][0]  # delta_H
-        if gap_idx == 1:
-            # d2：用实证偏移（负号表示从 raw d2 中减去，物理间距更小）
-            correction = -D2_EMPIRICAL_OFFSET
-        else:
-            # d1, d3：保留基于主面偏移的传统修正
-            correction = dHp_prev - dH_next  # 通常为负值（物理间距 < 高斯间距）
+        correction = dHp_prev - dH_next
         corrections.append(correction)
 
     # 打印修正量
@@ -430,10 +454,38 @@ def correct_zoom_spacings(zoom_configs, group_principal_planes):
               f"  {orig[3]:>8.3f} {corr[3]:>8.3f}"
               f"  {orig[4]:>8.3f} {corr[4]:>8.3f}")
 
-    # 检查是否有修正后间距为负（物理不可能）
-    for corr in corrected_configs:
+    # ── 临时夹紧：d2 < 0.5mm 时强制设为 0.5mm，超出部分对半平摊到 d1/d3 ──
+    # 目的：让 Zemax 能正常加载、先验证主面修正后的 EFL 改善。
+    # TOTR (d1+d2+d3) 保持不变，长焦端 G2-G3 间挤压问题留待
+    # Gaussianoptics 端调整 f1/f4 或 Zemax DLS 优化阶段解决。
+    MIN_GAP = 0.5  # mm
+    clamped_configs = []
+    print(f"\n[d2 临时夹紧 (MIN_GAP = {MIN_GAP} mm)]")
+    print(f"  {'位置':>14} {'d1原':>8} {'d1夹':>8} {'d2原':>8} {'d2夹':>8} {'d3原':>8} {'d3夹':>8} {'平摊':>8}")
+    print("  " + "-" * 78)
+    for name, efl, d1, d2, d3, epd in corrected_configs:
+        if d2 < MIN_GAP:
+            shortage = MIN_GAP - d2          # 需要给 d2 补多少（正值）
+            half = shortage / 2.0
+            d2_new = MIN_GAP
+            d1_new = d1 - half               # 从 d1 借
+            d3_new = d3 - half               # 从 d3 借
+            print(f"  {name:>14} {d1:>8.3f} {d1_new:>8.3f}"
+                  f" {d2:>8.3f} {d2_new:>8.3f}"
+                  f" {d3:>8.3f} {d3_new:>8.3f} {shortage:>+8.3f}")
+            # 检查夹紧后 d1/d3 是否反而变得过小
+            for di, lbl in [(d1_new, 'd1'), (d3_new, 'd3')]:
+                if di < MIN_GAP:
+                    print(f"    ⚠ {name} 的 {lbl}={di:.3f}mm 也 < {MIN_GAP}mm，"
+                          f"长焦端整体间距预算不足，建议回 Gaussianoptics 调 f1/f4。")
+            clamped_configs.append((name, efl, d1_new, d2_new, d3_new, epd))
+        else:
+            clamped_configs.append((name, efl, d1, d2, d3, epd))
+
+    # ── 原有的 < 0.3mm 警告（夹紧后理论上不应触发，作为最后防线）──
+    for corr in clamped_configs:
         for di, label in zip([corr[2], corr[3], corr[4]], ['d1', 'd2', 'd3']):
-            if di < 0.3:  # 最小空气间距 0.3mm
+            if di < 0.3:
                 print(f"  ⚠ 警告：{corr[0]} 的 {label} = {di:.3f} mm < 0.3mm，物理间距过小！")
 
-    return corrected_configs
+    return clamped_configs

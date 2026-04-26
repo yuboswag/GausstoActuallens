@@ -775,6 +775,8 @@ def run_action_a_pipeline(params: dict):
                         fnum_wide = S_SYSTEM_FNUM_WIDE,
                         fnum_tele = S_SYSTEM_FNUM_TELE,
                     )
+                    # 主面修正已禁用（NOOP），_corrected_zoom_cfgs 等价于 _raw_zoom_cfgs
+                    # 主面值仍传入以维持函数签名 + 写入 JSON 供赛德尔分析使用
                     _corrected_zoom_cfgs = correct_zoom_spacings(
                         _raw_zoom_cfgs, group_principal_planes)
 

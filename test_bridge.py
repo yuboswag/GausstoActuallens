@@ -68,50 +68,30 @@ def _load_all_from_json(json_path):
 
     print(f"  从 JSON 读取 {len(prescription)} 个面，{len(group_boundaries)} 个组")
 
-    # ── 2. 直接从面处方计算各组主面位置 ──────────────────────────
-    print(f"\n  [主面位置（从面处方直接计算）]")
+    # ── 2. 直接读 JSON 中已存的主面值 ──────────────────────────
+    # 由 main.py 调用修复后的 structure.py::compute_principal_planes 写入。
+    # JSON 是唯一权威源，不在此处重复计算，避免公式同步问题。
+    print(f"\n  [主面位置（从 JSON 读取，由 main.py 已正确计算）]")
+    pp_list = pp_data['group_principal_planes']
+    if len(pp_list) != len(group_boundaries):
+        raise ValueError(
+            f"JSON 中主面数据组数 ({len(pp_list)}) 与面处方组数 "
+            f"({len(group_boundaries)}) 不一致"
+        )
     group_pp = []
-    for gi, (start, end) in enumerate(group_boundaries):
-        group_surfs = prescription[start:end+1]
-        R_list = [s[2] for s in group_surfs]
-        n_list = [s[3] for s in group_surfs]  # 各面后介质 nd
-        t_list = [s[4] for s in group_surfs]  # 各面后厚度
-
-        M = np.eye(2)
-        for i in range(len(R_list)):
-            n_before = 1.0 if i == 0 else n_list[i - 1]
-            n_after = n_list[i]
-            R_i = R_list[i]
-
-            if abs(R_i) > 1e12:
-                R_mat = np.eye(2)
-            else:
-                phi_surf = (n_after - n_before) / R_i
-                R_mat = np.array([[1.0, 0.0], [-phi_surf, 1.0]])
-            M = R_mat @ M
-
-            if i < len(R_list) - 1:
-                T_mat = np.array([[1.0, t_list[i] / n_after], [0.0, 1.0]])
-                M = T_mat @ M
-
-        A, B, C, D = M[0,0], M[0,1], M[1,0], M[1,1]
-
-        if abs(C) < 1e-12:
-            print(f"    G{gi+1}: ⚠ 无焦系统")
-            group_pp.append((0.0, 0.0))
-            continue
-
-        dH = (1.0 - D) / C
-        dHp = (A - 1.0) / C
-        efl = -1.0 / C
+    for pp in pp_list:
+        dH = float(pp['delta_H'])
+        dHp = float(pp['delta_Hp'])
         group_pp.append((dH, dHp))
-        print(f"    G{gi+1}: EFL={efl:.3f} mm, delta_H={dH:+.4f} mm, delta_Hp={dHp:+.4f} mm")
+        print(f"    {pp['group']}: delta_H={dH:+.4f} mm, delta_Hp={dHp:+.4f} mm")
 
     # ── 3. 从原始间距 + 主面修正 → 物理间距 ─────────────────────
     raw_cfgs = pp_data['raw_zoom_configs']
     raw_tuples = [(c['name'], c['efl'], c['d1'], c['d2'], c['d3'], c['epd'])
                   for c in raw_cfgs]
 
+    # 主面修正已废弃（zoom_utils.correct_zoom_spacings 现为 NOOP）
+    # Gaussianoptics 直接输出物理顶点间距，无需修正
     from zoom_utils import correct_zoom_spacings
     corrected = correct_zoom_spacings(raw_tuples, group_pp)
 
