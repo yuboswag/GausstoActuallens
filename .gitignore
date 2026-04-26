@@ -40,3 +40,8 @@ Desktop.ini
 
 *.json
 !last_run_config.json
+
+# 备份文件
+*.bak
+
+.claude/
