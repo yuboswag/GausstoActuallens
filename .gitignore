@@ -36,5 +36,7 @@ Desktop.ini
 *.txt
 
 111.csv
-*.json
 .claude/
+
+*.json
+!last_run_config.json
