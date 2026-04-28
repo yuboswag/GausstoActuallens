@@ -564,6 +564,12 @@ class ActionGUI:
                                  gdef['spacings_mm'], hint='胶合面处填0')
         fc2.grid(row=0, column=1, sticky='ew', padx=(4, 0))
 
+        # 自动片间距开关：勾选后忽略手输内容，由 edge_geometry 自动计算
+        auto_sp_var = _make_bool('_spacing_auto', gdef.get('_spacing_auto', False))
+        ctk.CTkCheckBox(cem_space_frame, text="自动片间距（忽略手填）",
+                         variable=auto_sp_var, width=180).grid(
+                         row=1, column=1, sticky='w', padx=(4, 0), pady=(2, 0))
+
         # ═══ 结构约束（4 列紧凑）═══════════════════════════════════
         cons_frame = ctk.CTkFrame(tab, fg_color="transparent")
         cons_frame.grid(row=row, column=0, sticky='ew', padx=8, pady=4)
@@ -709,6 +715,7 @@ class ActionGUI:
             roles_raw       = _sv('glass_roles', '').strip()
             cem_raw         = _sv('cemented_pairs', '').strip()
             sp_raw          = _sv('spacings_mm', '').strip()
+            sp_auto         = _bv('_spacing_auto', False)
 
             groups.append({
                 'name':            _sv('name', f'G{gi+1}'),
@@ -719,7 +726,7 @@ class ActionGUI:
                 'glass_roles':     _parse_list_str(roles_raw) if roles_raw else None,
                 'apo':             _bv('apo', False),
                 'cemented_pairs':  _parse_cemented_pairs(cem_raw),
-                'spacings_mm':     _parse_floats(sp_raw) if sp_raw else [],
+                'spacings_mm':     None if sp_auto else (_parse_floats(sp_raw) if sp_raw else []),
                 'min_f_mm':        float(_sv('min_f_mm')) if _sv('min_f_mm').strip() else None,
                 'max_f_mm':        float(_sv('max_f_mm')) if _sv('max_f_mm').strip() else None,
                 'allow_duplicate': _bv('allow_duplicate', True),
@@ -851,7 +858,7 @@ class ActionGUI:
             'min_r_mm', 't_edge_min', 't_center_min', 't_cemented_min',
             'glass_names', 'focal_lengths_mm', 'vgen_list', 'nd_vals',
         ]
-        _bool_keys = ['apo', 'allow_duplicate']
+        _bool_keys = ['apo', 'allow_duplicate', '_spacing_auto']
         for gv in self._group_vars:
             gd = {}
             for k in _str_keys:
@@ -902,7 +909,7 @@ class ActionGUI:
             'min_r_mm', 't_edge_min', 't_center_min', 't_cemented_min',
             'glass_names', 'focal_lengths_mm', 'vgen_list', 'nd_vals',
         ]
-        _bool_keys = ['apo', 'allow_duplicate']
+        _bool_keys = ['apo', 'allow_duplicate', '_spacing_auto']
         for gi, gd in enumerate(raw.get('groups', [])):
             if gi >= len(self._group_vars):
                 break

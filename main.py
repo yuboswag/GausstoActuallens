@@ -53,6 +53,7 @@ from seidel_gemini import (
 from structure import compute_initial_structure
 from validation import build_seq_with_dispersion, validate_initial_structure
 from zoom_utils import compute_pbar_from_zoom_data, load_zoom_ray_csv, parse_csv_metadata, correct_zoom_spacings
+from edge_geometry import compute_auto_within_group_spacings
 from group_candidate import select_diverse_candidates
 from system_optimizer import (find_best_combinations, generate_diagnosis_report,
                               refine_combination)
@@ -170,6 +171,24 @@ def run_action_a_pipeline(params: dict):
     ALL_FOCAL_LENGTHS_MM= [g.get('focal_lengths_mm', []) for g in groups_cfg]
     ALL_CEMENTED_PAIRS  = [g.get('cemented_pairs') or []  for g in groups_cfg]
     ALL_SPACINGS_MM     = [g.get('spacings_mm', [])       for g in groups_cfg]
+
+    # ── 自动片间距：GUI 中勾选"自动片间距"的组，spacings_mm 为 None。
+    #   此处统一替换为基于 min_r_mm 和 D 的保守上界估计。
+    #   该步发生在所有 compute_initial_structure 调用之前，使整条数据流
+    #   （search / structure / auto / seidel 各模式）自动用上 auto 值。
+    for _gi, _g in enumerate(groups_cfg):
+        if ALL_SPACINGS_MM[_gi] is None:
+            _n_lenses = len(_g.get('glass_names', []) or _g.get('structure', []))
+            _auto_sp = compute_auto_within_group_spacings(
+                n_lenses       = _n_lenses,
+                cemented_pairs = _g.get('cemented_pairs', []),
+                min_r_mm       = float(_g.get('min_r_mm', 20.0)),
+                D_mm           = float(_g.get('D', 10.0)),
+                margin_mm      = 1.0,
+            )
+            ALL_SPACINGS_MM[_gi] = _auto_sp
+            print(f"  [auto-spacing] {_g.get('name', f'G{_gi+1}')} 自动片间距 = {_auto_sp}")
+
     ALL_D_MM            = [float(g.get('D', g.get('d_mm', 10.0))) for g in groups_cfg]
     ALL_VGEN_LIST       = [g.get('vgen_list', [])         for g in groups_cfg]
     ALL_TARGET_F_MM     = [float(g.get('target_f_mm', g['f_group'])) for g in groups_cfg]
