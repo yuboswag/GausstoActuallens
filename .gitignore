@@ -44,4 +44,4 @@ Desktop.ini
 # 备份文件
 *.bak
 
-.claude/
+.claude/last_run_config.json
