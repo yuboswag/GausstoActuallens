@@ -670,12 +670,58 @@ class ActionGUI:
         if path:
             self._var_xlsx.set(path)
 
+    def _parse_gauss_csv_header(self, path: str) -> dict:
+        """解析 Gaussianoptics 导出的 CSV 文件头部 # KEY=VALUE 行。
+
+        Returns:
+            dict[str, str]：包含所有解析到的 KEY=VALUE 对（VALUE 为字符串）。
+            文件不存在或读取失败时返回空 dict。
+        """
+        result = {}
+        try:
+            with open(path, 'r', encoding='utf-8-sig') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line.startswith('#'):
+                        break  # # 头结束，进入数据表
+                    body = line.lstrip('#').strip()
+                    if '=' in body:
+                        k, v = body.split('=', 1)
+                        result[k.strip()] = v.strip()
+        except (OSError, UnicodeDecodeError):
+            pass
+        return result
+
+    def _apply_gauss_header_to_groups(self, header: dict) -> int:
+        """把 # 头中的 F_G1~F_G4 / D_G1~D_G4 填入 _group_vars。
+
+        Returns:
+            int：成功填入的字段数（用于日志诊断）。
+        """
+        filled = 0
+        for gi in range(min(4, len(self._group_vars))):
+            gv = self._group_vars[gi]
+            f_key = f'F_G{gi+1}'
+            d_key = f'D_G{gi+1}'
+            if f_key in header and 'f_group' in gv:
+                gv['f_group'].set(header[f_key])
+                filled += 1
+            if d_key in header and 'D' in gv:
+                gv['D'].set(header[d_key])
+                filled += 1
+        return filled
+
     def _browse_gap_csv(self):
         path = filedialog.askopenfilename(
             title="选择组间间距 CSV 文件",
             filetypes=[("CSV 文件", "*.csv"), ("所有文件", "*.*")])
         if path:
             self._var_gap_csv.set(path)
+            # 自动解析 # 头并填入各组焦距/口径
+            header = self._parse_gauss_csv_header(path)
+            n = self._apply_gauss_header_to_groups(header)
+            if n > 0:
+                self._log(f"已从 {Path(path).name} 自动填入 {n} 项组焦距/口径\n")
 
     # ──────────────────────────────────────────────────────────────────
     #  参数收集 & 验证
@@ -963,6 +1009,14 @@ class ActionGUI:
                 self._apply_raw_config(raw)
             except Exception:
                 pass
+        # 启动后若 gap_csv 路径已恢复且文件存在，自动解析其 # 头填入组焦距/口径
+        try:
+            gp = self._var_gap_csv.get().strip()
+            if gp and Path(gp).exists():
+                header = self._parse_gauss_csv_header(gp)
+                self._apply_gauss_header_to_groups(header)
+        except Exception:
+            pass  # 启动期容错：解析失败不阻断 GUI 启动
 
     # ──────────────────────────────────────────────────────────────────
     #  日志操作
