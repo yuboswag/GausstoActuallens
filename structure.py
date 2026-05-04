@@ -711,9 +711,227 @@ def compute_initial_structure(
             if abs(phi[_fi_u]) > 1e-12:
                 q[_fi_u] = (_c1f + _c2f) * (nd[_fi_u] - 1) / phi[_fi_u]
 
+    clamp_notes = {}   # 早期初始化, 5c 可能往里写; 后续步骤会继续写入
+
+    # [TEMP] 5c 缩放总开关. False = 跳过 5c, 走原始 SLSQP 输出 + Zemax DLS 路径.
+    _ENABLE_5C_SCALING = False
+    if not _ENABLE_5C_SCALING:
+        print(f"\n【步骤5c】EFL 缩放修正  [跳过, _ENABLE_5C_SCALING=False]")
+    else:
+        # ══ 步骤5c：EFL 缩放修正 ════════════════════════════════════════════
+        # 目的: 让本组按 ABCD 全面追迹得到的厚透镜 EFL 精确等于 f_target.
+        # 方法: 所有曲率 c → k·c 统一缩放 (q 不变, 胶合面 SI=0 仍 SI=0).
+        #       间距和厚度保持不变. brentq 求根 f_thick(k) = 1/Σφᵢ.
+        # 副作用: 部分面 |R| 可能突破 min_R_mm; 触发 V1 警告 (clamp_notes).
+
+        # 5c.1: 构造当前面数据 (按光线传播顺序, 与 surfaces 序列一致)
+        _scaled_proc = set()
+        _curr_face_data = []   # [(c, n_after, t_placeholder, lens_idx, kind, cem_pair)]
+        for _i in range(N):
+            if _i in _scaled_proc:
+                continue
+            _cf = next((k for k in cemented_pairs if k[0] == _i), None)
+            if _cf:
+                _ci, _cj = _cf
+                _cr = cem_results[_cf]
+                _curr_face_data.append((1.0/_cr['R1']  if abs(_cr['R1'])>1e-12 else 0.0,
+                                        nd[_ci], 0.0, _ci, 'cf', _cf))
+                _curr_face_data.append((1.0/_cr['R_cem'] if abs(_cr['R_cem'])>1e-12 else 0.0,
+                                        nd[_cj], 0.0, _ci, 'cm', _cf))
+                _curr_face_data.append((1.0/_cr['R3']  if abs(_cr['R3'])>1e-12 else 0.0,
+                                        1.0, 0.0, _cj, 'cb', _cf))
+                _scaled_proc.add(_cj)
+            else:
+                if _i in _final_radii:
+                    _R1s, _R2s = _final_radii[_i]
+                else:
+                    _R1s, _R2s, _, _ = radii_single(q[_i], phi[_i], nd[_i], c_max)
+                _curr_face_data.append((1.0/_R1s if abs(_R1s)>1e-12 else 0.0,
+                                        nd[_i], 0.0, _i, 'front', None))
+                _curr_face_data.append((1.0/_R2s if abs(_R2s)>1e-12 else 0.0,
+                                        1.0, 0.0, _i, 'back', None))
+            _scaled_proc.add(_i)
+
+        # 5c.2: 算"参考厚度" (固定值, 仅用于 ABCD 评估; 缩放过程中不变)
+        _ref_thickness = {}
+        for _i in range(N):
+            if _i in _ref_thickness:
+                continue
+            _cf = next((k for k in cemented_pairs if k[0] == _i), None)
+            if _cf:
+                _cj = _cf[1]
+                _cr = cem_results[_cf]
+                _t2, _t3, _ = compute_cemented_thickness(
+                    _cr['R1'], _cr['R_cem'], _cr['R3'],
+                    D_mm, phi[_i], phi[_cj],
+                    t_cemented_min, t_edge_min)
+                _ref_thickness[_i]  = _t2
+                _ref_thickness[_cj] = _t3
+            else:
+                if _i in _final_radii:
+                    _R1r, _R2r = _final_radii[_i]
+                else:
+                    _R1r, _R2r, _, _ = radii_single(q[_i], phi[_i], nd[_i], c_max)
+                _t, _ = compute_thickness(_R1r, _R2r, D_mm, phi[_i] >= 0,
+                                           t_edge_min, t_center_min)
+                _ref_thickness[_i] = _t
+
+        # 把 t_after 填进 _curr_face_data
+        _filled = []
+        for _idx, (_c_i, _na_i, _, _li_i, _kind_i, _cp_i) in enumerate(_curr_face_data):
+            _is_last = (_idx == len(_curr_face_data) - 1)
+            if _is_last:
+                _t_after = 0.0
+            elif _kind_i == 'cf':
+                _t_after = _ref_thickness[_cp_i[0]]
+            elif _kind_i == 'cm':
+                _t_after = _ref_thickness[_cp_i[1]]
+            elif _kind_i == 'front':
+                _t_after = _ref_thickness[_li_i]
+            else:
+                _t_after = (spacings_mm[_li_i]
+                            if _li_i < len(spacings_mm) else 0.0)
+            _filled.append((_c_i, _na_i, _t_after, _li_i, _kind_i, _cp_i))
+        _curr_face_data = _filled
+
+        # 5c.3: f_thick(k)
+        def _efl_with_scale(k_val):
+            _M = np.eye(2)
+            _n_prev = 1.0
+            for _idx_e, (_c_e, _na_e, _t_e, _, _, _) in enumerate(_curr_face_data):
+                _phi_e = (_na_e - _n_prev) * (k_val * _c_e)
+                _R_mat = np.array([[1.0, 0.0], [-_phi_e, 1.0]])
+                _M = _R_mat @ _M
+                if _idx_e < len(_curr_face_data) - 1:
+                    _T_mat = np.array([[1.0, _t_e / _na_e], [0.0, 1.0]])
+                    _M = _T_mat @ _M
+                _n_prev = _na_e
+            _C_e = _M[1, 0]
+            if abs(_C_e) < 1e-15:
+                return float('inf')
+            return -1.0 / _C_e
+
+        # 5c.4: brentq 求根 f_thick(k) = 1/Σφᵢ
+        _phi_sum = sum(phi)
+        f_target_local = 1.0 / _phi_sum if abs(_phi_sum) > 1e-12 else float('inf')
+        _efl_at_1 = _efl_with_scale(1.0)
+        _scale_msg = ''
+        _scale_factor_applied = 1.0
+
+        # 先在大区间上扫描 f_thick(k), 总是构建并打印扫描表 (无论后续是否求解成功).
+        # 用扫描点之间的"端点函数值符号 + 端点函数值绝对值合理性" 来识别非奇点区间.
+        _scan_ks = [0.1, 0.2, 0.3, 0.5, 0.7, 0.85, 1.0, 1.15, 1.3, 1.5, 1.7, 2.0, 2.5, 3.0, 5.0, 10.0]
+        _scan_diffs = []
+        for _ks in _scan_ks:
+            _ev = _efl_with_scale(_ks)
+            _diff = (_ev - f_target_local) if np.isfinite(_ev) else float('nan')
+            _scan_diffs.append((_ks, _ev, _diff))
+        _scan_table_str = '  k扫描表 (target={:+.4f}):\n'.format(f_target_local)
+        for _ks, _ev, _diff in _scan_diffs:
+            _evs = f'{_ev:+10.3f}' if np.isfinite(_ev) else '       inf'
+            _dfs = f'{_diff:+10.3f}' if np.isfinite(_diff) else '       nan'
+            _scan_table_str += f'    k={_ks:5.2f}  f_thick={_evs}  diff={_dfs}\n'
+
+        # 选 bracket: 必须满足 (1) 端点 diff 异号 (2) 端点 EFL 都在合理量级
+        # 合理量级判据: |f_thick| < 100 * |target|. 这能把跨奇点产生的 ±1e9 类
+        # 假符号变化筛掉 (奇点附近 |EFL| 趋于无穷大).
+        _max_reasonable = 100.0 * abs(f_target_local)
+        _bracket = None
+        for _i_b in range(len(_scan_diffs) - 1):
+            _ka, _va, _da = _scan_diffs[_i_b]
+            _kb, _vb, _db = _scan_diffs[_i_b + 1]
+            if not (np.isfinite(_da) and np.isfinite(_db)):
+                continue
+            if _da * _db >= 0:
+                continue
+            if abs(_va) > _max_reasonable or abs(_vb) > _max_reasonable:
+                continue   # 跨奇点的虚假异号
+            _bracket = (_ka, _kb)
+            break
+
+        if not np.isfinite(f_target_local) or not np.isfinite(_efl_at_1):
+            _scale_msg = ('EFL 缩放跳过: target 或 k=1 时 EFL 非有限\n'
+                          + _scan_table_str)
+        elif abs(_efl_at_1 - f_target_local) / abs(f_target_local) < 1e-3:
+            _scale_msg = (f'EFL 缩放跳过: k=1 时偏差 '
+                          f'{(_efl_at_1-f_target_local)/f_target_local*100:+.3f}% < 0.1%')
+        elif _bracket is None:
+            _scale_msg = ('EFL 缩放失败: 在 k∈[0.1, 10] 无合法异号区间 '
+                          '(可能跨奇点或物理不可达).\n' + _scan_table_str)
+        else:
+            try:
+                _k_solve = brentq(
+                    lambda k: _efl_with_scale(k) - f_target_local,
+                    _bracket[0], _bracket[1], xtol=1e-8, maxiter=200,
+                )
+                _efl_after = _efl_with_scale(_k_solve)
+                # 防奇点二次校验: brentq 找到的 k_solve 处, EFL 必须真的接近 target.
+                # 如果偏差 > 1%, 说明 brentq 在不连续函数上找到了假零点, 拒绝缩放.
+                _post_err_pct = (abs(_efl_after - f_target_local) /
+                                 abs(f_target_local) * 100)
+                if _post_err_pct > 1.0 or not np.isfinite(_efl_after):
+                    _scale_msg = (f'EFL 缩放失败: brentq 找到 k={_k_solve:.4f} 但 '
+                                  f'EFL={_efl_after:+.3f} 远离 target '
+                                  f'(偏差 {_post_err_pct:.2f}%, 怀疑跨奇点假零点); '
+                                  f'保持原值.\n' + _scan_table_str)
+                else:
+                    _scale_factor_applied = _k_solve
+                    _scale_msg = (f'EFL 缩放: k={_k_solve:.6f}  '
+                                  f'(k=1 时 EFL={_efl_at_1:+.3f} → '
+                                  f'k={_k_solve:.4f} 时 EFL={_efl_after:+.3f}, '
+                                  f'target={f_target_local:+.3f}, '
+                                  f'bracket=[{_bracket[0]}, {_bracket[1]}])')
+            except (ValueError, RuntimeError) as _e:
+                _scale_msg = (f'EFL 缩放失败: brentq 在 [{_bracket[0]}, '
+                              f'{_bracket[1]}] 异常 ({_e}); 保持原值.\n'
+                              + _scan_table_str)
+
+        # 5c.5: 应用缩放, 写回 cem_results / _final_radii, 突破检查写 clamp_notes
+        if abs(_scale_factor_applied - 1.0) > 1e-9:
+            _k = _scale_factor_applied
+            _scale_breach_notes = {}
+            for _key_s, _cr_s in cem_results.items():
+                for _r_field in ('c1', 'c_cem', 'c3'):
+                    _cr_s[_r_field] = _cr_s[_r_field] * _k
+                _cr_s['R1']    = (1.0 / _cr_s['c1']
+                                  if abs(_cr_s['c1']) > 1e-12 else float('inf'))
+                _cr_s['R_cem'] = (1.0 / _cr_s['c_cem']
+                                  if abs(_cr_s['c_cem']) > 1e-12 else float('inf'))
+                _cr_s['R3']    = (1.0 / _cr_s['c3']
+                                  if abs(_cr_s['c3']) > 1e-12 else float('inf'))
+                _ci_s, _cj_s = _key_s
+                for _r_val, _label_s in [
+                    (_cr_s['R1'], f'片{_ci_s+1}({glass_names[_ci_s]}) 前表面'),
+                    (_cr_s['R_cem'], f'片{_ci_s+1}/{_cj_s+1} 胶合面'),
+                    (_cr_s['R3'], f'片{_cj_s+1}({glass_names[_cj_s]}) 后表面'),
+                ]:
+                    if abs(_r_val) < min_R_mm - 1e-6 and abs(_r_val) > 1e-6:
+                        _scale_breach_notes[_label_s] = (
+                            f'⚠ EFL 缩放后 R={_r_val:+.2f}mm 突破 min_R_mm '
+                            f'({min_R_mm:.1f}mm), 缩放系数 k={_k:.4f}.')
+            for _li_s, (_R1_old, _R2_old) in list(_final_radii.items()):
+                _c1_old = 1.0 / _R1_old if abs(_R1_old) > 1e-12 else 0.0
+                _c2_old = 1.0 / _R2_old if abs(_R2_old) > 1e-12 else 0.0
+                _c1_new = _c1_old * _k
+                _c2_new = _c2_old * _k
+                _R1_new = 1.0 / _c1_new if abs(_c1_new) > 1e-12 else float('inf')
+                _R2_new = 1.0 / _c2_new if abs(_c2_new) > 1e-12 else float('inf')
+                _final_radii[_li_s] = (_R1_new, _R2_new)
+                for _r_val, _label_s in [
+                    (_R1_new, f'片{_li_s+1}({glass_names[_li_s]}) 前表面'),
+                    (_R2_new, f'片{_li_s+1}({glass_names[_li_s]}) 后表面'),
+                ]:
+                    if abs(_r_val) < min_R_mm - 1e-6 and abs(_r_val) > 1e-6:
+                        _scale_breach_notes[_label_s] = (
+                            f'⚠ EFL 缩放后 R={_r_val:+.2f}mm 突破 min_R_mm '
+                            f'({min_R_mm:.1f}mm), 缩放系数 k={_k:.4f}.')
+            clamp_notes.update(_scale_breach_notes)
+        print(f"\n【步骤5c】EFL 缩放修正")
+        print(f"  {_scale_msg}")
+
     # ── 整理折射面序列 ────────────────────────────────────────
     surfaces    = []   # (面描述, R值, 所属片索引, 是否是胶合面)
-    clamp_notes = {}   # {面描述: 截断说明}  ── 仅记录被 c_max 截断的非胶合面
+    # clamp_notes 已在【步骤5c】之前初始化, 此处不重复初始化以保留 5c 写入的内容
     processed   = set()
 
     for i in range(N):
