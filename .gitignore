@@ -45,3 +45,5 @@ Desktop.ini
 *.bak
 
 .claude/last_run_config.json
+
+last_run_config.json

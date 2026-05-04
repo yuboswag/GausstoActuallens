@@ -40,6 +40,26 @@ import os
 import sys
 from pathlib import Path
 from typing import Any
+# ─── 临时调试: 把所有 print/异常输出同时写到 run_log.txt ───
+class _Tee:
+    def __init__(self, *streams):
+        self.streams = streams
+    def write(self, data):
+        for s in self.streams:
+            try:
+                s.write(data); s.flush()
+            except Exception:
+                pass
+    def flush(self):
+        for s in self.streams:
+            try: s.flush()
+            except Exception: pass
+
+_log_file = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              'run_log.txt'), 'w', encoding='utf-8')
+sys.stdout = _Tee(sys.__stdout__, _log_file)
+sys.stderr = _Tee(sys.__stderr__, _log_file)
+# ─── 调试段结束 ───
 
 import numpy as np
 
@@ -55,6 +75,7 @@ from validation import build_seq_with_dispersion, validate_initial_structure
 from zoom_utils import compute_pbar_from_zoom_data, load_zoom_ray_csv, parse_csv_metadata, correct_zoom_spacings
 from edge_geometry import compute_auto_within_group_spacings
 from group_candidate import select_diverse_candidates
+from diagnose_group_efl import diagnose_from_action_a_state
 from system_optimizer import (find_best_combinations, generate_diagnosis_report,
                               refine_combination)
 from config import EXCLUDED_FOR_OUTER
@@ -652,6 +673,26 @@ def run_action_a_pipeline(params: dict):
 
         valid_count = sum(1 for r in auto_struct_results if r is not None)
         if valid_count == N_GROUPS:
+            # ── EFL 三方诊断: CSV 目标 vs 候选薄透镜实算 vs Zemax 实测 ──
+            try:
+                _f_targets_diag = [g['f_group'] for g in ALL_GROUPS]
+                # 如果有 Zemax 实测值, 在这里填入 4 个数; 否则保持 None
+                _f_zemax_diag = None
+                # 例如: _f_zemax_diag = [74.011, -17.999, 25.963, 42.295]
+                diagnose_from_action_a_state(
+                    auto_struct_results  = auto_struct_results,
+                    auto_all_glass_names = auto_all_glass_names,
+                    auto_all_nd_values   = auto_all_nd_values,
+                    all_cemented_pairs   = ALL_CEMENTED_PAIRS,
+                    all_spacings_mm      = ALL_SPACINGS_MM,
+                    f_targets            = _f_targets_diag,
+                    f_zemax              = _f_zemax_diag,
+                    group_names          = tuple(g['name'] for g in ALL_GROUPS),
+                )
+            except Exception as _diag_e:
+                print(f"  ⚠ EFL 诊断失败: {_diag_e}")
+            # ── 诊断结束 ──
+
             # ── 主面间距修正：提取各组主面位置 ─────────────────────────
             group_principal_planes = []
             for _gi_pp in range(N_GROUPS):
