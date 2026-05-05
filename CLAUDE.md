@@ -39,7 +39,7 @@
 | 光学核心 | `dispersion.py`, `glass_db.py`, `seidel_gemini.py`, `solver.py`, `zoom_utils.py` | `solver.py` 求 power 分配 |
 | 搜索 / 优化 | `group_candidate.py`, `search.py`, `scoring.py`, `system_optimizer.py`, `sensitivity_scan.py` | `system_optimizer.py` 跑 SLSQP 联合优化 |
 | Zemax 桥接 | `zemax_bridge.py`, `test_bridge.py`, `run_test_zoom_lde.py` | `zemax_bridge.py` 是桥接主体 |
-| 验证 / 诊断 | `validation.py`, `diag_minimal.py`, `analyze_theoretical_efl.py`, `invert_d2.py`, `invert_all_gaps.py` | 按需读，无固定主角 |
+| 验证 / 诊断 | `validation.py`, `validate_geometry.py`, `run_geom_check.py`, `diag_minimal.py`, `analyze_theoretical_efl.py`, `invert_d2.py`, `invert_all_gaps.py` | 按需读，无固定主角 |
 
 需要函数级细节时直接读对应文件，**不要**在本文档里展开实现说明。
 
@@ -89,6 +89,19 @@ analysis.GetResults().GetTextFile(tmp_path)
 - `GetTextFile` 偶尔异步写入失败，需重试（指数退避）
 - **不存在**的方法：`New_CardinalPoints()`、`Analyses.New_Cardinals()` — 会抛 AttributeError
 
+### Seidel 跨 config 读取的可靠路径
+
+`zemax_bridge.read_seidel()` 内部用 `MFE.CalculateMeritFunction()`,在 extension 模式下会重置当前 config 到 1,导致 5 个 config 返回相同 Seidel 值(踩坑确认 2026-05-05)。
+
+**正确做法:** 用 `Analyses.New_Analysis(AnalysisIDM.SeidelCoefficients)`,Analysis 对象自带 config 状态运行,不调 `CalculateMeritFunction`。
+
+报告文本格式(UTF-16-LE):
+- 第一段标题:`赛德尔像差系数:`(精确匹配,带冒号)
+- 该段下"累计"行 split('\t'),strip 后 parts[1:6] = S1/S2/S3/S4/S5
+- 报告还含波像差段、横向段、轴向段(各自有自己的"累计"行),不要混淆
+
+参考实现见 `read_seidel_per_config.py::_read_seidel_total_via_analysis`,模板照搬自 `zemax_bridge._read_efl_via_cardinal`(EFL 也踩过同样的坑,同样靠 Cardinal Points Analysis 解决)。
+
 ### 正补偿四组元：d2 与 EFL 反相关（符号方向）
 
 - d2 减小 → EFL 增大（Tele 端 d2 最小）
@@ -124,6 +137,23 @@ correction = errors[i] * damping * d2[i]   # 不带负号
 - structure.py 原公式符号反了（(1-D)/C, (A-1)/C），已修复
 - test_bridge.py 原本自己重算主面，绕过 structure.py 修复，已改为读 JSON
 - zoom_utils.correct_zoom_spacings 已改为 NOOP（实验对比 raw vs 修正后，raw 全面更优）
+
+### `write_zoom_system` 多波长支持（2026-04 新增）
+
+`zemax_bridge.ZemaxBridge.write_zoom_system()` 现在接受 `wavelengths_um` 参数，
+代替原来的硬编码 6 波长（0.55/0.45/0.65/0.75/0.85/0.95）。
+
+- `wavelengths_um=None`：回退到单波长 `wavelength_um`
+- 第一个波长自动设为主波长（权重 1.0）
+- 调用方参考（`test_bridge.py`）：传入可见光三波长 `[0.55, 0.45, 0.65]`
+
+### 新文件：几何独立校验（2026-04 新增）
+
+`validate_geometry.py` 对 `last_run_config.json` 中的扁平面处方做几何可行性校验，
+**不依赖 Zemax**，可在无 ZOS-API 环境下运行。
+
+- 对每个变焦 config 单独检查：面顺序、厚度非负、边缘厚度、胶合面合理性
+- `run_geom_check.py` 是直接调用的包装脚本
 
 ### 其他 ZOS-API extension 模式坑
 
