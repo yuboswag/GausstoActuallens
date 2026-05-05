@@ -4,7 +4,7 @@ analyze_theoretical_efl.py — 用 ABCD 矩阵追迹精确计算 26 面系统的
 import json
 import numpy as np
 
-JSON_PATH = r'D:\myprojects\Action_a\last_run_config.json'
+JSON_PATH = r'D:\myprojects\gauss_to_lens\last_run_config.json'
 
 
 def compute_efl_abcd(surface_prescriptions, d1, d2, d3):

@@ -34,7 +34,7 @@ _DEFAULT_GROUPS = [
         'glass_roles':     '',
         'apo':             False,
         'cemented_pairs':  '(1,2)',
-        'spacings_mm':     '1.0,0.0,1.0',
+        'spacings_mm':     '2.0,0.0,4.5',
         'min_f_mm':        '40',
         'max_f_mm':        '',
         'allow_duplicate': True,
@@ -78,7 +78,7 @@ _DEFAULT_GROUPS = [
         'glass_roles':     '',
         'apo':             False,
         'cemented_pairs':  '(1,2)',
-        'spacings_mm':     '1.0,0.0',
+        'spacings_mm':     '5.7,0.0',
         'min_f_mm':        '15',
         'max_f_mm':        '',
         'allow_duplicate': True,
@@ -104,7 +104,7 @@ _DEFAULT_GROUPS = [
         'min_f_mm':        '15',
         'max_f_mm':        '',
         'allow_duplicate': True,
-        'min_r_mm':        '16.0',
+        'min_r_mm':        '20.0',
         't_edge_min':      '1.0',
         't_center_min':    '1.5',
         't_cemented_min':  '3.0',
@@ -115,7 +115,7 @@ _DEFAULT_GROUPS = [
     },
 ]
 
-_AUTO_SAVE_FILE = Path(__file__).parent / 'action_a_last_config.json'
+_AUTO_SAVE_FILE = Path(__file__).parent / 'gauss_to_lens_last_config.json'
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -157,3 +157,13 @@ def _parse_cemented_pairs(s: str) -> list:
 def _parse_melt_filter(s: str) -> list:
     """'MA,常熔,2' → ['MA','常熔','2']"""
     return [p.strip() for p in s.split(',') if p.strip()]
+
+
+# === 边缘几何预校正阈值（初始解最低门槛，非工程化阈值） ===
+EDGE_GEOMETRY = {
+    "ET_MIN_MM": 0.4,
+    "AET_MIN_MM": 0.15,
+    "CT_MIN_MM": 1.0,
+    "TTL_INFLATION_WARN": 0.05,
+    "TTL_INFLATION_ABORT": 0.15,
+}

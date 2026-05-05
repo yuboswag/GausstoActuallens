@@ -1,21 +1,13 @@
 # CLAUDE.md
+> **命名说明**：本地工程目录为 `gauss_to_lens`（原 `Action_a`，2026-05 重命名）；GitHub 仓库名保持 `yuboswag/GausstoActuallens` 不变。文档和代码注释中出现的 `Action_a` 为历史名称，等同于 `gauss_to_lens`。
 
 本文件为 Claude Code 在本目录工作时的约定。
-**当前任务状态见 `PLAN.md`，开始工作前请先读一次。**
-
 **硬性规则**：回复与代码注释一律中文；变量名保持英文。
-
----
+...
 
 ## 项目定位
-
-**Action_a**：四组元正补偿型变焦镜头初始结构自动化设计工具。
-主流程：高斯解求 power 分配 → 玻璃搜索 → Seidel 像差 SLSQP 联合优化
-→ 写入 Zemax 验证。
-
-- 输入：`111.csv`（姊妹项目 Gaussianoptics 生成的变焦位置参数）
-- 输出：`test_zoom_lde.zmx`（Zemax 多组态镜头文件）
-
+**gauss_to_lens**（历史名 Action_a）：四组元正补偿型变焦镜头初始结构自动化设计工具。
+...
 ---
 
 ## 环境约定

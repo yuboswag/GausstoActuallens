@@ -5,7 +5,7 @@ import json
 import numpy as np
 from scipy.optimize import brentq
 
-JSON_PATH = r'D:\myprojects\Action_a\last_run_config.json'
+JSON_PATH = r'D:\myprojects\gauss_to_lens\last_run_config.json'
 ABCD_SCALE = 0.95  # ABCD vs Zemax 系统偏差
 
 

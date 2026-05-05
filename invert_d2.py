@@ -9,7 +9,7 @@ import json
 import numpy as np
 from scipy.optimize import brentq
 
-JSON_PATH = r'D:\myprojects\Action_a\last_run_config.json'
+JSON_PATH = r'D:\myprojects\gauss_to_lens\last_run_config.json'
 
 # ─── 复用 analyze_theoretical_efl.py 里的 ABCD 函数 ─────────
 def compute_efl_abcd(surface_prescriptions, d1, d2, d3):

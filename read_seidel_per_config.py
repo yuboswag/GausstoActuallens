@@ -5,8 +5,8 @@ read_seidel_per_config.py
 """
 import json, os, sys, tempfile, time, uuid, io
 
-ZMX_PATH  = r"D:\myprojects\Action_a\test_zoom_lde_opt.zmx"
-JSON_PATH = r"D:\myprojects\Action_a\last_run_config.json"
+ZMX_PATH  = r"D:\myprojects\gauss_to_lens\test_zoom_lde_opt.zmx"
+JSON_PATH = r"D:\myprojects\gauss_to_lens\last_run_config.json"
 
 
 def _read_seidel_total_via_analysis(bridge, cfg_idx):

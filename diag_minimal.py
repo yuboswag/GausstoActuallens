@@ -10,7 +10,7 @@ import os
 import json
 import traceback
 
-LOG = r'D:\myprojects\Action_a\_diag_minimal.log'
+LOG = r'D:\myprojects\gauss_to_lens\_diag_minimal.log'
 
 def log(msg=''):
     print(msg, flush=True)
@@ -62,7 +62,7 @@ try:
         log(f"    New_Analysis 调用成功，对象类型 = {type(analysis).__name__}")
         analysis.ApplyAndWaitForCompletion()
         log("    ApplyAndWaitForCompletion 调用成功")
-        tmp = r'D:\myprojects\Action_a\_diag_minimal_card.txt'
+        tmp = r'D:\myprojects\gauss_to_lens\_diag_minimal_card.txt'
         analysis.GetResults().GetTextFile(tmp)
         if os.path.exists(tmp):
             size = os.path.getsize(tmp)
@@ -96,7 +96,7 @@ log("\n" + "=" * 60)
 log("  PART 2：d2 异常值来源排查（纯静态分析）")
 log("=" * 60)
 
-json_path = r'D:\myprojects\Action_a\last_run_config.json'
+json_path = r'D:\myprojects\gauss_to_lens\last_run_config.json'
 try:
     with open(json_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
