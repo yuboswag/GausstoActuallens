@@ -25,6 +25,10 @@ import os
 import re
 import math
 import tempfile
+import uuid
+
+from edge_geometry import enforce_edge_geometry, print_report, SurfaceGeom
+from config import _DEFAULT_GROUPS, EDGE_GEOMETRY
 
 # ---------------------------------------------------------------------------
 # Zemax 安装路径默认值（已在本机验证）
@@ -458,64 +462,126 @@ class ZemaxBridge:
         通过 Cardinal Points Analysis 逐配置读取 EFL（mm）。
         ZOS-API 2024 R1 正确调用路径：
           Analyses.New_Analysis(AnalysisIDM.CardinalPoints)
+
+        修复要点（相对旧版）：
+          1. 每次 iteration 用唯一文件名，避免 GetTextFile 静默失败
+          2. SetCurrentConfiguration 后轮询确认切换生效，再触发分析
+          3. 每次重试都重新 GetResults，避免对象内部缓存返回旧报告
+          4. analysis.Close 后短暂 sleep，避免下一次 New_Analysis 互相干扰
         """
-        import tempfile, os, time
+        import tempfile, os, time, uuid
         mce = self._system.MCE
         n_configs = mce.NumberOfConfigurations
         analysis_id = self._ZOSAPI.Analysis.AnalysisIDM.CardinalPoints
         efls = []
 
-        for cfg in range(1, n_configs + 1):
-            mce.SetCurrentConfiguration(cfg)
+        tmp_dir = tempfile.gettempdir()
 
+        for cfg in range(1, n_configs + 1):
+            # ── 1. 切换配置并轮询确认 ─────────────────────────
+            mce.SetCurrentConfiguration(cfg)
+            for _wait in range(20):
+                if mce.CurrentConfiguration == cfg:
+                    break
+                time.sleep(0.05)
+            else:
+                raise RuntimeError(
+                    f'Config {cfg} 切换 1 秒未生效'
+                )
+            # 即使轮询返回正确值，再多等一拍让 LDE 内部数据稳定
+            time.sleep(0.1)
+
+            # ── 2. 创建分析 ───────────────────────────────────
             analysis = self._system.Analyses.New_Analysis(analysis_id)
+            content = None
             try:
                 analysis.ApplyAndWaitForCompletion()
 
-                # 用 NamedTemporaryFile 生成可靠路径（关闭后文件仍留存）
-                with tempfile.NamedTemporaryFile(
-                    mode='w', suffix='.txt', delete=False
-                ) as tf:
-                    tmp_path = tf.name
-
-                # 重试循环：最多 5 次，指数退避
-                results = analysis.GetResults()
-                content = None
+                # ── 3. 重试循环：每次用新文件名 + 新 GetResults ──
                 for attempt in range(5):
+                    tmp_path = os.path.join(
+                        tmp_dir,
+                        f'cardinal_cfg{cfg}_{uuid.uuid4().hex}.txt'
+                    )
+
                     try:
+                        results = analysis.GetResults()  # 每次都新取
                         results.GetTextFile(tmp_path)
                     except Exception as e:
                         print(f'    [重试 {attempt+1}] GetTextFile 异常: {e}')
 
-                    if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 100:
+                    file_ok = (os.path.exists(tmp_path)
+                               and os.path.getsize(tmp_path) > 100)
+                    if file_ok:
                         try:
                             with open(tmp_path, 'r', encoding='utf-16-le',
                                       errors='replace') as f:
                                 content = f.read()
                             if '焦长' in content or 'Effective' in content:
-                                break  # 成功读到有效内容
+                                # 成功，清理本次文件并跳出
+                                try:
+                                    os.unlink(tmp_path)
+                                except Exception:
+                                    pass
+                                break
+                            else:
+                                content = None  # 内容无效，下一次重试
                         except Exception as e:
                             print(f'    [重试 {attempt+1}] 读取异常: {e}')
+                            content = None
 
-                    if attempt < 4:  # 最后一次不用等
+                    # 清理本次文件，避免堆积
+                    try:
+                        os.unlink(tmp_path)
+                    except Exception:
+                        pass
+
+                    # 指数退避（最后一次不用等）
+                    if attempt < 4:
                         time.sleep(0.1 * (2 ** attempt))
 
-                try:
-                    os.unlink(tmp_path)
-                except Exception:
-                    pass
-
                 if content is None:
+                    # 失败时尝试再读一次最后的临时文件，把内容前 600 字符写入异常
+                    diag = '(无法获取诊断信息)'
+                    try:
+                        last_path = os.path.join(
+                            tmp_dir,
+                            f'cardinal_diag_cfg{cfg}_{uuid.uuid4().hex}.txt'
+                        )
+                        results = analysis.GetResults()
+                        results.GetTextFile(last_path)
+                        if os.path.exists(last_path):
+                            size = os.path.getsize(last_path)
+                            if size > 0:
+                                with open(last_path, 'r',
+                                          encoding='utf-16-le',
+                                          errors='replace') as f:
+                                    diag_text = f.read()
+                                diag = (f'文件 size={size} 字节，'
+                                        f'前 600 字符: {diag_text[:600]!r}')
+                            else:
+                                diag = f'文件 size=0 字节（GetTextFile 静默失败）'
+                            try:
+                                os.unlink(last_path)
+                            except Exception:
+                                pass
+                        else:
+                            diag = '文件未生成（GetTextFile 完全失败）'
+                    except Exception as _e:
+                        diag = f'诊断时异常: {_e}'
+
                     raise RuntimeError(
-                        f'Config {cfg} Cardinal Points 5 次重试后仍失败'
+                        f'Config {cfg} Cardinal Points 5 次重试后仍失败 | {diag}'
                     )
             finally:
                 try:
                     analysis.Close()
                 except Exception:
                     pass
+                # 让 Zemax 完成 analysis 关闭，下一次 New_Analysis 才不会干扰
+                time.sleep(0.05)
 
-            # 解析含"焦长"的行
+            # ── 4. 解析含"焦长"的行 ─────────────────────────
             efl = None
             for line in content.splitlines():
                 if '焦长' in line or 'Effective Focal Length' in line:
@@ -870,7 +936,8 @@ class ZemaxBridge:
 
     def write_zoom_system(self, surface_prescription, zoom_configs,
                           wavelength_um=0.587056, sensor_half_diag_mm=3.8,
-                          stop_surface_idx=14, bfd_mm=8.0):
+                          stop_surface_idx=14, bfd_mm=8.0,
+                          wavelengths_um=None):
         """
         写入变焦系统的 LDE 面数据（第一步：只写面，不管 MCE）。
 
@@ -892,6 +959,8 @@ class ZemaxBridge:
           sensor_half_diag_mm: 传感器半对角线 (mm)，用于设置视场
           stop_surface_idx: 光阑面的 Action_a 编号（默认 14 → Surface 15）
           bfd_mm: 最后一面到像面的距离 (mm)，默认 8.0
+          wavelengths_um: 波长列表（μm），第一个为主波长。例如 [0.55, 0.45, 0.65]。
+                          若为 None 则使用 [wavelength_um] 单波长。
 
         步骤：
           1. TheSystem.New(False) 创建空白系统
@@ -925,20 +994,26 @@ class ZemaxBridge:
         # 现在是 OBJ(0) + IMA(1) = 2 面
         print(f"[write_zoom_system] 清理后面数: {TheLDE.NumberOfSurfaces}（期望 2）")
 
-        # 2. 设置 6 个波长：0.55/0.45/0.65/0.75/0.85/0.95 μm，主波长 0.55 放第一个
+        # 2. 设置波长
         TheWavelengths = TheSystem.SystemData.Wavelengths
+
+        # 确定波长列表
+        if wavelengths_um is None or len(wavelengths_um) == 0:
+            wl_list = [wavelength_um]
+        else:
+            wl_list = list(wavelengths_um)
 
         # 先移除所有现有波长（从最后一个往前删，保留至少 1 个）
         while TheWavelengths.NumberOfWavelengths > 1:
             TheWavelengths.RemoveWavelength(TheWavelengths.NumberOfWavelengths)
 
-        # 设置第一个波长为主波长 0.55 μm
+        # 设置第一个波长（主波长）
         wl1 = TheWavelengths.GetWavelength(1)
-        wl1.Value = 0.55
+        wl1.Value = wl_list[0]
         wl1.Weight = 1.0
 
-        # 添加剩余 5 个波长
-        for wl_um in [0.45, 0.65, 0.75, 0.85, 0.95]:
+        # 添加剩余波长
+        for wl_um in wl_list[1:]:
             TheWavelengths.AddWavelength(wl_um, 1.0)
 
         # 设置主波长编号为 1
@@ -950,7 +1025,8 @@ class ZemaxBridge:
             except AttributeError:
                 print("[write_zoom_system] [警告] 无法设置主波长编号，已使用默认 Wavelength 1")
 
-        print(f"[write_zoom_system] 已设置 6 个波长：0.55/0.45/0.65/0.75/0.85/0.95 μm")
+        wl_str = '/'.join(f'W{i+1}' for i in range(len(wl_list)))
+        print(f"[write_zoom_system] 已设置 {len(wl_list)} 个波长：{wl_str} = {wl_list} μm")
 
         # 3. 设置视场类型为 Real Image Height
         #    新系统默认已有 Field 1 (0, 0)，直接复用，只 Add 两个离轴视场
@@ -969,6 +1045,44 @@ class ZemaxBridge:
 
         # 5. 插入 26 个面（OBJ=0 已存在，IMA 在末尾）
         #    当前 LDE 有 OBJ(0) 和 IMA(1) 共 2 面，需要在 index 1 处插入 26 个面
+        # ===== 边缘几何预校正 =====
+        _surfaces = []
+        _group_apertures = {i+1: float(g['D']) for i, g in enumerate(_DEFAULT_GROUPS)}
+        for _tup in surface_prescription:
+            _idx, _desc, _R, _n_out, _t_after, _glass = _tup
+            _m = re.match(r'G(\d+)-', _desc)
+            _gid = int(_m.group(1)) if _m else 1
+            _sd = _group_apertures.get(_gid, 10.0) / 2.0
+            _surfaces.append(SurfaceGeom(
+                surf_idx=_idx, radius=_R, thickness=_t_after,
+                semi_diameter=_sd, is_glass=_glass is not None, group_id=_gid,
+            ))
+        _config_spacings = {}
+        for _cfg in zoom_configs:
+            _config_spacings[_cfg[0]] = {1: _cfg[2], 2: _cfg[3], 3: _cfg[4]}
+        _surf_corr, _spac_corr, _report = enforce_edge_geometry(
+            _surfaces, _config_spacings, EDGE_GEOMETRY
+        )
+        print_report(_report)
+        if _report.aborted:
+            raise RuntimeError(
+                f"边缘几何预校正中止: {_report.abort_reason}\n"
+                "请人工检查 Gaussianoptics 焦距分配或调整 EDGE_GEOMETRY 阈值。"
+            )
+        _thickness_corr = {s.surf_idx: s.thickness for s in _surf_corr}
+        _zoom_corr = []
+        for _cfg in zoom_configs:
+            _name = _cfg[0]
+            _sp = _spac_corr.get(_name, {})
+            _zoom_corr.append((
+                _name, _cfg[1],
+                _sp.get(1, _cfg[2]),
+                _sp.get(2, _cfg[3]),
+                _sp.get(3, _cfg[4]),
+                _cfg[5],
+            ))
+        # ===== 预校正结束 =====
+
         #    使用递增索引插入，确保 Action_a 面 0 对应 Surface 1
         for i in range(1, 27):  # i 从 1 到 26
             TheLDE.InsertNewSurfaceAt(i)  # 在 index i 插入，新面成为 Surface i
@@ -979,7 +1093,7 @@ class ZemaxBridge:
             zemax_surf_num = idx + 1  # 关键偏移：Action_a 面 N → Zemax Surface N+1
             surf = TheLDE.GetSurfaceAt(zemax_surf_num)
             surf.Radius = R  # 直接用曲率半径
-            surf.Thickness = t_after
+            surf.Thickness = _thickness_corr.get(idx, t_after)
             if glass is not None:
                 surf.Material = glass
             # 可选：设置注释
@@ -1040,9 +1154,9 @@ class ZemaxBridge:
             op.Param1 = zemax_surf
             for cfg_idx in range(n_configs):
                 op.GetOperandCell(cfg_idx + 1).DoubleValue = \
-                    zoom_configs[cfg_idx][cfg_col]
+                    _zoom_corr[cfg_idx][cfg_col]
             print(f"[write_zoom_system] MCE 行 {row_idx}: THIC Surface {zemax_surf} "
-                  f"← {[zoom_configs[i][cfg_col] for i in range(n_configs)]}")
+                  f"← {[_zoom_corr[i][cfg_col] for i in range(n_configs)]}")
 
         # 9.4 插入光圈操作数（F/#）
         # APER = ZOS-API MCE 中光圈的操作数枚举名
@@ -1052,7 +1166,7 @@ class ZemaxBridge:
         op_fnum.ChangeType(ZOSAPI.Editors.MCE.MultiConfigOperandType.APER)
         fnum_values = []
         for cfg_idx in range(n_configs):
-            fnum = zoom_configs[cfg_idx][1] / zoom_configs[cfg_idx][5]  # F/# = EFL / EPD
+            fnum = _zoom_corr[cfg_idx][1] / _zoom_corr[cfg_idx][5]  # F/# = EFL / EPD
             op_fnum.GetOperandCell(cfg_idx + 1).DoubleValue = fnum
             fnum_values.append(fnum)
         print(f"[write_zoom_system] MCE 行 {fnum_row}: APER（F/#）"

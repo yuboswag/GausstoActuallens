@@ -142,6 +142,7 @@ except Exception as e:
 
 # 其他参数
 WAVELENGTH_UM = 0.587056        # 主波长（d 线）
+WAVELENGTHS_UM = [0.55, 0.45, 0.65]   # 主波长在第一个，可见光三波长
 SENSOR_HALF_DIAG_MM = 3.8       # 传感器半对角线
 STOP_SURFACE_IDX = 14           # 光阑面的 Action_a 编号
 BFD_MM = 8.0                    # 最后一面到像面的距离
@@ -215,6 +216,7 @@ def run_test():
                 surface_prescription=SURFACE_PRESCRIPTION,
                 zoom_configs=ZOOM_CONFIGS,
                 wavelength_um=WAVELENGTH_UM,
+                wavelengths_um=WAVELENGTHS_UM,
                 sensor_half_diag_mm=SENSOR_HALF_DIAG_MM,
                 stop_surface_idx=STOP_SURFACE_IDX,
                 bfd_mm=BFD_MM
