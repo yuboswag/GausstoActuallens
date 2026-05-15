@@ -144,6 +144,7 @@ class ActionGUI:
 
         self._build_ui()
         self._load_auto_save()
+        self._auto_load_csv_on_startup()
 
     # ──────────────────────────────────────────────────────────────────
     #  UI 构建
@@ -710,6 +711,31 @@ class ActionGUI:
                 gv['D'].set(header[d_key])
                 filled += 1
         return filled
+
+    def _auto_load_csv_on_startup(self) -> None:
+        """启动时自动加载 CSV header 元数据（焦距/口径）。
+
+        路径优先级：
+          1. _var_gap_csv 中已有的路径（由 _load_auto_save 从 _AUTO_SAVE_FILE 恢复）
+          2. fallback：action_gui.py 同目录下的 111.csv
+        都不可用时静默跳过，不阻断 GUI 启动。
+        """
+        csv_path = self._var_gap_csv.get().strip()
+        if not csv_path or not Path(csv_path).exists():
+            default = Path(__file__).parent / '111.csv'
+            if not default.exists():
+                return
+            csv_path = str(default.resolve())
+            self._var_gap_csv.set(csv_path)
+            self._log(f"[启动] 未找到上次的 CSV 路径,使用默认: {csv_path}\n")
+        try:
+            header = self._parse_gauss_csv_header(csv_path)
+            n = self._apply_gauss_header_to_groups(header)
+        except Exception as e:
+            self._log(f"[启动] CSV header 自动加载失败: {e}\n")
+            return
+        if n > 0:
+            self._log(f"[启动] 已从 {Path(csv_path).name} 自动填入 {n} 项组焦距/口径\n")
 
     def _browse_gap_csv(self):
         path = filedialog.askopenfilename(
