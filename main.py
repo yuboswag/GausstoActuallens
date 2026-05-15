@@ -71,6 +71,7 @@ from seidel_gemini import (
     print_all, print_seq_index,
 )
 from structure import compute_initial_structure
+from structure import ENABLE_5C_SCALING as _STRUCT_ENABLE_5C
 from validation import build_seq_with_dispersion, validate_initial_structure
 from zoom_utils import compute_pbar_from_zoom_data, load_zoom_ray_csv, parse_csv_metadata, correct_zoom_spacings
 from edge_geometry import compute_auto_within_group_spacings
@@ -550,6 +551,43 @@ def run_action_a_pipeline(params: dict):
                     pbar_overrides   = _pbar_overrides,
                 )
 
+                # ═════════ Path A: rank-1 5c 失败时换候选 ═════════════════════
+                _PATH_A_MAX_RANKS = 10
+                if _STRUCT_ENABLE_5C and abs(_struct_result.get('scale_factor_applied', 1.0) - 1.0) < 1e-9:
+                    print(f"  [Path A] {gp['name']} rank-1 5c 失败 (k=1.0), 试换候选")
+                    for _try_rank in range(1, min(_PATH_A_MAX_RANKS, len(results))):
+                        _cand_a = results[_try_rank]
+                        _sr_try = compute_initial_structure(
+                            glass_names      = _cand_a['names'],
+                            nd_values        = {n: nv for n, nv in zip(_cand_a['names'], _cand_a['ns'])},
+                            focal_lengths_mm = [1.0 / p for p in _cand_a['phis']],
+                            cemented_pairs   = _cem_pairs,
+                            spacings_mm      = _spacings,
+                            D_mm             = _d_mm,
+                            min_R_mm         = _min_r_mm,
+                            t_edge_min       = _t_edge,
+                            t_center_min     = _t_center,
+                            t_cemented_min   = _t_cemented,
+                            h1               = _d_mm / 2.0,
+                            u0               = 0.0,
+                            pbar_overrides   = _pbar_overrides,
+                        )
+                        _k_app_try = _sr_try.get('scale_factor_applied', 1.0)
+                        if abs(_k_app_try - 1.0) > 1e-9:
+                            _struct_result      = _sr_try
+                            best                = _cand_a
+                            _auto_glass_names   = _cand_a['names']
+                            _auto_nd_values     = {n: nv for n, nv in zip(_cand_a['names'], _cand_a['ns'])}
+                            _auto_focal_lengths = [1.0 / p for p in _cand_a['phis']]
+                            _auto_vgen_list     = _cand_a['Vgens']
+                            print(f"  [Path A] {gp['name']} 选用 rank-{_try_rank+1}: 5c k={_k_app_try:.4f}")
+                            break
+                        else:
+                            print(f"  [Path A] {gp['name']} rank-{_try_rank+1} 5c 失败 (k=1.0)")
+                    else:
+                        print(f"  [Path A] {gp['name']} rank-1..{min(_PATH_A_MAX_RANKS, len(results))} 全失败, 兜底用 rank-1")
+                # ═════════ Path A 结束 ═══════════════════════════════════════
+
                 _group_cands = select_diverse_candidates(
                     search_results  = results,
                     group_index     = gi,
@@ -754,6 +792,16 @@ def run_action_a_pipeline(params: dict):
                             )
                             print(f"  光阑面绝对索引（组元索引+偏移计算）: {_sys_stop_idx}")
 
+                            # ── 从 CSV 元数据读取 G4 δH' 软约束目标值 ────
+                            _sys_csv_meta = parse_csv_metadata(_sys_csv_path)
+                            _target_dHp_G4 = _sys_csv_meta.get('delta_hp_g4', None)
+                            _w_dHp_G4 = 1.0   # 与 SI/SII 同量级，后续根据诊断表调整
+                            if _target_dHp_G4 is not None:
+                                print(f"  G4 δH' 软约束: target={_target_dHp_G4:+.3f}mm, "
+                                      f"w={_w_dHp_G4}")
+                            else:
+                                print(f"  ℹ CSV 无 DELTA_HP_G4 元数据，跳过 G4 δH' 软约束")
+
                             _best_combos = find_best_combinations(
                                 all_group_candidates = auto_group_candidates,
                                 zoom_positions       = _sys_zoom_pos,
@@ -762,6 +810,8 @@ def run_action_a_pipeline(params: dict):
                                 half_fov_rad         = _sys_fov,
                                 top_k                = 5,
                                 weights              = SYSTEM_ABERR_WEIGHTS,
+                                target_dHp_G4        = _target_dHp_G4,
+                                w_dHp_G4             = _w_dHp_G4,
                             )
 
                             if _best_combos:
@@ -829,9 +879,21 @@ def run_action_a_pipeline(params: dict):
                 _sys_csv_path_pp = (S_SYSTEM_GAP_CSV if S_SYSTEM_GAP_CSV.is_absolute()
                                     else Path(__file__).parent / S_SYSTEM_GAP_CSV)
                 try:
+                    # ── BFD 从 CSV 元数据读取（替代硬编码 8.0）─────
+                    _csv_meta_bfd = parse_csv_metadata(_sys_csv_path_pp)
+                    _bfd_from_csv = _csv_meta_bfd.get('bfd_target', None)
+                    _bfl_min     = _csv_meta_bfd.get('bfl_min', 8.0)
+                    if _bfd_from_csv is None:
+                        print(f"  ⚠ CSV 无 BFD_TARGET 元数据，回退硬编码 8.0mm")
+                        _bfd_used = 8.0
+                    else:
+                        _bfd_used = _bfd_from_csv
+                        print(f"  ℹ BFD={_bfd_used:+.3f}mm, "
+                              f"BFL_MIN={_bfl_min:.3f}mm（来自 CSV）")
+
                     _raw_zoom_cfgs = load_zoom_configs_for_zemax(
                         csv_path  = _sys_csv_path_pp,
-                        bfd_mm    = 8.0,  # 默认 BFD，后续 Zemax 闭环中迭代修正
+                        bfd_mm    = _bfd_used,
                         fnum_wide = S_SYSTEM_FNUM_WIDE,
                         fnum_tele = S_SYSTEM_FNUM_TELE,
                     )

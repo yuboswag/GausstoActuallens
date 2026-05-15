@@ -221,6 +221,8 @@ def system_merit_function(
     half_fov_rad    : float,
     weights         : Optional[dict] = None,
     seq_cache       : Optional[Dict[int, List[dict]]] = None,
+    target_dHp_G4   : Optional[float] = None,
+    w_dHp_G4        : float = 1.0,
 ) -> float:
     """
     计算一组候选方案组合在所有变焦位置下的系统总赛德尔系数评价值。
@@ -273,6 +275,14 @@ def system_merit_function(
     system_seq  = _stitch_group_seqs(group_seqs, first_gaps)
 
     merit = 0.0
+
+    # ── G4 后主面 δH' 软约束（Gaussianoptics → gauss_to_lens 一致性）──
+    # target_dHp_G4 来自 Gaussianoptics CSV 元数据中的 DELTA_HP_G4 字段
+    # 用户在 GUI 输入 G4 后主面偏移，gauss_to_lens 在此施加软约束
+    # 推使 G4 候选选择层倾向于选择 struct_result['delta_Hp'] 接近 target 的候选
+    if target_dHp_G4 is not None and len(candidates_combo) >= 4:
+        _g4_dHp_actual = candidates_combo[3].struct_result.get('delta_Hp', 0.0)
+        merit += w_dHp_G4 * (_g4_dHp_actual - target_dHp_G4) ** 2
 
     # ── Step 3：逐变焦位置评估 ──────────────────────────────────────
     for zi, zp in enumerate(zoom_positions):
@@ -363,6 +373,8 @@ def find_best_combinations(
     top_k               : int = 5,
     weights             : Optional[dict] = None,
     prune_m             : Optional[int]  = None,
+    target_dHp_G4       : Optional[float] = None,
+    w_dHp_G4            : float = 1.0,
 ) -> List[dict]:
     """
     在各组元候选方案中搜索系统像差互补最优的组合。
@@ -443,6 +455,7 @@ def find_best_combinations(
             merit = system_merit_function(
                 combo, zoom_positions, stop_idx, d_mm_list, half_fov_rad, weights,
                 seq_cache=_seq_cache,
+                target_dHp_G4=target_dHp_G4, w_dHp_G4=w_dHp_G4,
             )
             all_results.append((merit, combo))
 
@@ -517,6 +530,7 @@ def find_best_combinations(
                     exact_merit = system_merit_function(
                         combo, zoom_positions, stop_idx, d_mm_list, half_fov_rad,
                         weights, seq_cache=_seq_cache,
+                        target_dHp_G4=target_dHp_G4, w_dHp_G4=w_dHp_G4,
                     )
                     final_pool.append((exact_merit, combo))
                     if (fi + 1) % max(1, prune_m // 5) == 0:
@@ -550,6 +564,28 @@ def find_best_combinations(
             row += f"  {combo_str:<{col_w*2}}"
         print(row)
     print(_SEP)
+
+    # ══════════════════════════════════════════════════════════════════
+    #  G4 δH' 诊断表（仅当施加了 G4 δH' 软约束时打印）
+    # ══════════════════════════════════════════════════════════════════
+    if target_dHp_G4 is not None and output:
+        print(f"\n{_SEP}")
+        print(f"  [G4 δH' 诊断] target={target_dHp_G4:+.3f}mm, w={w_dHp_G4}")
+        print(_SEP)
+        print(f"  {'排名':>3}  {'actual δH^':>12}  {'偏差(mm)':>10}  "
+              f"{'软约束惩罚':>14}  {'判定':>6}")
+        print(f"  {'-'*60}")
+        for r in output:
+            if len(r['combo']) >= 4:
+                actual = r['combo'][3].struct_result.get('delta_Hp', 0.0)
+                dev = actual - target_dHp_G4
+                penalty = w_dHp_G4 * dev ** 2
+                verdict = '✓' if abs(dev) < 5.0 else ('△' if abs(dev) < 15.0 else '✗')
+                print(f"  {r['rank']:>3}.  {actual:>+12.3f}  {dev:>+10.3f}  "
+                      f"{penalty:>14.6f}  {verdict:>6}")
+        print(_SEP)
+        print(f"  判定: ✓ 偏差<5mm, △ 偏差<15mm, ✗ 偏差≥15mm")
+        print(_SEP)
 
     return output
 
