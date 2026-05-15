@@ -430,60 +430,63 @@ def run_test():
             traceback.print_exc()
             all_pass = False
 
-        # ------------------------------------------------------------------ #
-        #  步骤 5c: EFL 闭环迭代修正（在步骤 5 框架内）
-        # ------------------------------------------------------------------ #
-        print("\n  [5c] EFL 闭环迭代修正:")
+        # ============ [策略2实验] 5c EFL 闭环已禁用 ============
+        # 原 5c 闭环代码段保留在下方 if False 块内, 实验完毕后可恢复
+        if False:
+            # ------------------------------------------------------------------ #
+            #  步骤 5c: EFL 闭环迭代修正（在步骤 5 框架内）
+            # ------------------------------------------------------------------ #
+            print("\n  [5c] EFL 闭环迭代修正:")
 
-        # 直接使用脚本内存中的修正后间距（由 _load_all_from_json 计算得到）
-        # ZOOM_CONFIGS 格式：(name, efl, d1, d2, d3, epd)
-        try:
-            print(f"    使用 ZOOM_CONFIGS 中的修正后间距（{len(ZOOM_CONFIGS)} 个配置）")
+            # 直接使用脚本内存中的修正后间距（由 _load_all_from_json 计算得到）
+            # ZOOM_CONFIGS 格式：(name, efl, d1, d2, d3, epd)
+            try:
+                print(f"    使用 ZOOM_CONFIGS 中的修正后间距（{len(ZOOM_CONFIGS)} 个配置）")
 
-            # 提取各参数数组
-            d1_arr = [cfg[2] for cfg in ZOOM_CONFIGS]
-            d2_arr = [cfg[3] for cfg in ZOOM_CONFIGS]
-            d3_arr = [cfg[4] for cfg in ZOOM_CONFIGS]
-            target_efls = [cfg[1] for cfg in ZOOM_CONFIGS]
-            # cfg[5] 是 EPD（mm），F/# = EFL / EPD
-            f_numbers = [cfg[1] / cfg[5] for cfg in ZOOM_CONFIGS]
+                # 提取各参数数组
+                d1_arr = [cfg[2] for cfg in ZOOM_CONFIGS]
+                d2_arr = [cfg[3] for cfg in ZOOM_CONFIGS]
+                d3_arr = [cfg[4] for cfg in ZOOM_CONFIGS]
+                target_efls = [cfg[1] for cfg in ZOOM_CONFIGS]
+                # cfg[5] 是 EPD（mm），F/# = EFL / EPD
+                f_numbers = [cfg[1] / cfg[5] for cfg in ZOOM_CONFIGS]
 
-            print(f"    配置名称: {[cfg[0] for cfg in ZOOM_CONFIGS]}")
-            print(f"    目标 EFL: {[f'{v:.3f}' for v in target_efls]}")
-            print(f"    初始 d2:  {[f'{v:.3f}' for v in d2_arr]}")
-            print(f"    F/#:       {[f'{v:.1f}' for v in f_numbers]}")
+                print(f"    配置名称: {[cfg[0] for cfg in ZOOM_CONFIGS]}")
+                print(f"    目标 EFL: {[f'{v:.3f}' for v in target_efls]}")
+                print(f"    初始 d2:  {[f'{v:.3f}' for v in d2_arr]}")
+                print(f"    F/#:       {[f'{v:.1f}' for v in f_numbers]}")
 
-            result = bridge.iterative_efl_correction(
-                target_efls=target_efls,
-                d1_arr=d1_arr,
-                d2_arr=d2_arr,
-                d3_arr=d3_arr,
-                f_numbers=f_numbers,
-                max_iter=15,
-                tol=0.02,
-                verbose=True,
-            )
+                result = bridge.iterative_efl_correction(
+                    target_efls=target_efls,
+                    d1_arr=d1_arr,
+                    d2_arr=d2_arr,
+                    d3_arr=d3_arr,
+                    f_numbers=f_numbers,
+                    max_iter=15,
+                    tol=0.02,
+                    verbose=True,
+                )
 
-            if result['converged']:
-                print(f"  [ PASS ] EFL 收敛，迭代 {result['iterations']} 次")
-            else:
-                print(f"  [ WARN ] EFL 未完全收敛，最终误差：")
-                for i, (efl, err) in enumerate(
-                        zip(result['final_efls'], result['final_errors'])):
-                    print(f"    Config {i+1}: 实际={efl:.3f}mm  误差={err:+.1f}%")
+                if result['converged']:
+                    print(f"  [ PASS ] EFL 收敛，迭代 {result['iterations']} 次")
+                else:
+                    print(f"  [ WARN ] EFL 未完全收敛，最终误差：")
+                    for i, (efl, err) in enumerate(
+                            zip(result['final_efls'], result['final_errors'])):
+                        print(f"    Config {i+1}: 实际={efl:.3f}mm  误差={err:+.1f}%")
 
-            # 保存收敛后的文件
-            corrected_save_path = os.path.join(
-                os.path.dirname(SAVE_PATH),
-                'test_zoom_lde_corrected.zmx'
-            )
-            bridge.save_file(corrected_save_path)
-            print(f"  已保存收敛后文件：{corrected_save_path}")
+                # 保存收敛后的文件
+                corrected_save_path = os.path.join(
+                    os.path.dirname(SAVE_PATH),
+                    'test_zoom_lde_corrected.zmx'
+                )
+                bridge.save_file(corrected_save_path)
+                print(f"  已保存收敛后文件：{corrected_save_path}")
 
-        except Exception as e:
-            fail_msg(f"EFL 闭环修正失败：{e}")
-            traceback.print_exc()
-            all_pass = False
+            except Exception as e:
+                fail_msg(f"EFL 闭环修正失败：{e}")
+                traceback.print_exc()
+                all_pass = False
 
         # ------------------------------------------------------------------ #
         # 步骤 7：保存文件（原始测试文件）
