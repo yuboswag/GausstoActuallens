@@ -11,6 +11,8 @@ from scipy.optimize import brentq, minimize_scalar, minimize
 
 from zoom_utils import compute_pbar_from_zoom_data, load_zoom_ray_csv
 
+# 5c EFL 缩放总开关 (模块级常量, 供调用方查询)
+ENABLE_5C_SCALING = False  # [策略2实验] 关闭 5c 缩放, R 保留 SLSQP 输出
 
 def compute_principal_planes(surfaces_data, thicknesses_data, nd_values_dict,
                              glass_names_list, spacings_mm_list, cemented_pairs_list):
@@ -713,8 +715,9 @@ def compute_initial_structure(
 
     clamp_notes = {}   # 早期初始化, 5c 可能往里写; 后续步骤会继续写入
 
-    # [TEMP] 5c 缩放总开关. False = 跳过 5c, 走原始 SLSQP 输出 + Zemax DLS 路径.
-    _ENABLE_5C_SCALING = False
+    
+    _ENABLE_5C_SCALING = ENABLE_5C_SCALING  # 读模块级常量
+    _scale_factor_applied = 1.0   # 默认值, 让 5c 跳过分支下 return dict 仍可读
     if not _ENABLE_5C_SCALING:
         print(f"\n【步骤5c】EFL 缩放修正  [跳过, _ENABLE_5C_SCALING=False]")
     else:
@@ -886,6 +889,45 @@ def compute_initial_structure(
                               f'{_bracket[1]}] 异常 ({_e}); 保持原值.\n'
                               + _scan_table_str)
 
+        # 5c.4b (Path B): brentq 失败时的 best-effort 兜底 — 在安全 k 区间内取 argmin |residual|
+        if abs(_scale_factor_applied - 1.0) < 1e-9 \
+           and np.isfinite(f_target_local) and np.isfinite(_efl_at_1) \
+           and abs((_efl_at_1 - f_target_local) / f_target_local) >= 1e-3:
+            _FALLBACK_TOL = 0.15        # 残差容差: |residual|/|target| 必须 ≤ 此值
+
+            # 1. 在 _scan_diffs 上识别第一个奇点位置, 确定安全 k 区间
+            _safe_max_idx = len(_scan_diffs) - 1
+            for _i_b in range(len(_scan_diffs) - 1):
+                _ka, _va, _da = _scan_diffs[_i_b]
+                _kb, _vb, _db = _scan_diffs[_i_b + 1]
+                if not (np.isfinite(_va) and np.isfinite(_vb)):
+                    _safe_max_idx = _i_b
+                    break
+                if (np.sign(_va) != np.sign(_vb)
+                        and (abs(_va) > _max_reasonable or abs(_vb) > _max_reasonable)):
+                    _safe_max_idx = _i_b
+                    break
+
+            # 2. 在安全 k 区间内找 argmin |diff|
+            _safe_valid = [(k, v, d) for (k, v, d) in _scan_diffs[:_safe_max_idx + 1]
+                           if np.isfinite(d)]
+            if _safe_valid:
+                _k_best, _v_best, _d_best = min(_safe_valid, key=lambda t: abs(t[2]))
+                _residual_frac = abs(_d_best) / abs(f_target_local)
+
+                if _residual_frac <= _FALLBACK_TOL:
+                    # R 突破由 5c.5 阶段统一检查并写入 clamp_notes (与 brentq 路径一致)
+                    _scale_factor_applied = _k_best
+                    _scale_msg += (f'\n  [Path B 兜底成功] best-effort k={_k_best:.6f}, '
+                                   f'f_thick={_v_best:+.3f} '
+                                   f'(target={f_target_local:+.3f}, '
+                                   f'残差 {_residual_frac * 100:.2f}% ≤ '
+                                   f'{_FALLBACK_TOL * 100:.0f}%)')
+                else:
+                    _scale_msg += (f'\n  [Path B 兜底失败] 安全区内最佳 k={_k_best:.6f} '
+                                   f'残差 {_residual_frac * 100:.2f}% > '
+                                   f'{_FALLBACK_TOL * 100:.0f}%, 保持 k=1')
+
         # 5c.5: 应用缩放, 写回 cem_results / _final_radii, 突破检查写 clamp_notes
         if abs(_scale_factor_applied - 1.0) > 1e-9:
             _k = _scale_factor_applied
@@ -926,8 +968,12 @@ def compute_initial_structure(
                             f'⚠ EFL 缩放后 R={_r_val:+.2f}mm 突破 min_R_mm '
                             f'({min_R_mm:.1f}mm), 缩放系数 k={_k:.4f}.')
             clamp_notes.update(_scale_breach_notes)
+
         print(f"\n【步骤5c】EFL 缩放修正")
         print(f"  {_scale_msg}")
+        open("5c_debug.log", "a", encoding="utf-8").write(
+            f"[5c] f_target={f_target_local:+.4f}  k_applied={_scale_factor_applied:.6f}  msg={_scale_msg!r}\n"
+        )
 
     # ── 整理折射面序列 ────────────────────────────────────────
     surfaces    = []   # (面描述, R值, 所属片索引, 是否是胶合面)
@@ -1160,6 +1206,7 @@ def compute_initial_structure(
 
     return dict(p=p, q=q, surfaces=surfaces, thickness=thickness,
                 cem_results=cem_results, clamp_notes=clamp_notes,
-                delta_H=delta_H, delta_Hp=delta_Hp)
+                delta_H=delta_H, delta_Hp=delta_Hp,
+                scale_factor_applied=_scale_factor_applied)
 
 
