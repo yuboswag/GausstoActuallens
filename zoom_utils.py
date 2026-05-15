@@ -7,6 +7,8 @@ zoom_utils.py
 import numpy as np
 from pathlib import Path
 
+
+
 # ============================================================
 # 第九部分：初始结构计算（共轭因子 p、形状因子 q、曲率半径 R、中心厚度 t）
 # ============================================================
@@ -229,7 +231,8 @@ def parse_csv_metadata(csv_path, encoding='utf-8-sig'):
                             metadata['stop_group'] = int(value)
                         elif key == 'stop_shift':
                             metadata['stop_shift'] = float(value)
-                        elif key in ('f_number_wide', 'f_number_tele', 'sensor_size'):
+                        elif key in ('f_number_wide', 'f_number_tele', 'sensor_size',
+                                     'bfd_target', 'bfl_min', 'delta_hp_g4'):
                             metadata[key] = float(value)
                     except ValueError:
                         pass  # 解析失败则跳过
@@ -320,7 +323,8 @@ def check_mechanical_gaps_feasible(
     参数
     ----
     d1_thin_arr, d2_thin_arr, d3_thin_arr : array_like
-        各变焦位置的薄透镜间距（主面间距），单位 mm
+        各变焦位置的 raw 物理顶点间距（Gaussianoptics 直接输出），单位 mm
+        [2026-05] 不再使用主面间距语义，与 correct_zoom_spacings 同步
     delta_Hp_G1, delta_H_G2 : float
         G1 后主面偏移、G2 前主面偏移
     delta_Hp_G2, delta_H_G3 : float
@@ -336,9 +340,14 @@ def check_mechanical_gaps_feasible(
         feasible : bool，所有位置气隙均 >= min_gap_mm 时 True
         min_d1/min_d2/min_d3 : 各气隙在所有位置中的最小值
     """
-    d1_mech = d1_thin_arr + delta_Hp_G1 - delta_H_G2
-    d2_mech = d2_thin_arr + delta_Hp_G2 - delta_H_G3
-    d3_mech = d3_thin_arr + delta_Hp_G3 - delta_H_G4
+    # [2026-05 修复] 主面修正不对应机械装配——
+    # 物理装配只看 G1 末面顶点 → G2 首面顶点距离（即 Gaussianoptics raw d）
+    # 主面是数学量，不占物理空间。与 correct_zoom_spacings 保持 NOOP 一致。
+    # 注：真实机械气隙的"候选真实厚度溢出 vs Gaussianoptics 假设厚度"修正
+    # 需要候选传递真实总厚信息，为后续工作项。
+    d1_mech = np.asarray(d1_thin_arr, dtype=float)
+    d2_mech = np.asarray(d2_thin_arr, dtype=float)
+    d3_mech = np.asarray(d3_thin_arr, dtype=float)
 
     min_d1 = float(np.min(d1_mech))
     min_d2 = float(np.min(d2_mech))
