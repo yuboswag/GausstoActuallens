@@ -803,10 +803,11 @@ def run_action_a_pipeline(params: dict):
 
                             # ── 从 CSV 元数据读取 BFD 与 G4 δH'（BFL 来自 GUI）────
                             _sys_csv_meta = parse_csv_metadata(_sys_csv_path)
-                            _bfd_target = _sys_csv_meta.get('bfl_ideal', None)
-                            if _bfd_target is None:
-                                print(f"  ⚠ CSV 无 BFL_Ideal 元数据，回退硬编码 8.0mm")
-                                _bfd_target = 8.0
+                            _bfl_ideal_csv = _sys_csv_meta.get('bfl_ideal', None)
+                            if _bfl_ideal_csv is not None:
+                                print(f"  ℹ CSV BFL_Ideal={_bfl_ideal_csv:.3f}mm（参考值，实际用 GUI bfd_actual）")
+                            _bfd_target = float(sys_cfg.get('bfd_actual', 8.0))
+                            print(f"  ℹ bfd_actual={_bfd_target:.3f}mm（来自 GUI）")
 
                             # G4 δH' 软约束已被 BFL 硬约束取代（默认禁用，保留代码便于回退）
                             # 如需启用旧机制，把下行改回:  _sys_csv_meta.get('delta_hp_g4', None)
@@ -902,7 +903,9 @@ def run_action_a_pipeline(params: dict):
                 try:
                     # ── BFD 从 CSV 元数据读取（替代硬编码 8.0）─────
                     _csv_meta_bfd = parse_csv_metadata(_sys_csv_path_pp)
-                    _bfd_from_csv = _csv_meta_bfd.get('bfl_ideal', None)
+                    _bfl_ideal_csv2 = _csv_meta_bfd.get('bfl_ideal', None)
+                    if _bfl_ideal_csv2 is not None:
+                        print(f"  ℹ CSV BFL_Ideal={_bfl_ideal_csv2:.3f}mm（参考值）")
                     # BFL 来源优先级: GUI > CSV(向后兼容) > 默认 8.0
                     if S_SYSTEM_BFL_MIN is not None and S_SYSTEM_BFL_MAX is not None:
                         _bfl_min_log = S_SYSTEM_BFL_MIN
@@ -912,11 +915,7 @@ def run_action_a_pipeline(params: dict):
                         _bfl_min_log = _csv_meta_bfd.get('bfl_min', 8.0)
                         _bfl_max_log = None
                         _bfl_source  = "CSV(fallback)"
-                    if _bfd_from_csv is None:
-                        print(f"  ⚠ CSV 无 BFL_Ideal 元数据，回退硬编码 8.0mm")
-                        _bfd_used = 8.0
-                    else:
-                        _bfd_used = _bfd_from_csv
+                    _bfd_used = float(sys_cfg.get('bfd_actual', 8.0))
                         if _bfl_max_log is not None:
                             print(f"  ℹ BFD={_bfd_used:+.3f}mm, "
                                   f"BFL=[{_bfl_min_log:.3f},{_bfl_max_log:.3f}]mm（{_bfl_source}）")
