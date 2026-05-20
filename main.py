@@ -772,7 +772,30 @@ def run_action_a_pipeline(params: dict):
             if _ttl_ideal_csv is None:
                 print(f"  [TTL_actual] CSV 无 TTL_Ideal，跳过检查")
             _ttl_reject = False
-        # ── 检查结束 ─────────────────────────────────────────────────
+        # ── TTL_actual 检查结束 ─────────────────────────────────────
+
+        # ── bfd_actual 硬拒绝检查 ────────────────────────────────────
+        _bfl_ideal_for_bfd = _sys_csv_meta.get('bfl_ideal', None) if '_sys_csv_meta' in dir() else None
+        if _bfl_ideal_for_bfd is not None and _bfd_target > 0.0:
+            _bfd_computed = _bfl_ideal_for_bfd - _dHp_G4
+            _bfd_delta = abs(_bfd_computed - _bfd_target)
+            print(f"  [bfd_actual] BFL_Ideal_csv={_bfl_ideal_for_bfd:.3f}, "
+                  f"ΔH'_G4={_dHp_G4:+.4f} → "
+                  f"bfd_computed={_bfd_computed:.3f}mm, "
+                  f"bfd_actual_user={_bfd_target:.3f}mm, "
+                  f"delta={_bfd_delta:.3f}mm")
+            if _bfd_delta > 2.0:
+                print(f"  [bfd_actual REJECT] delta={_bfd_delta:.3f}mm > 2.0mm 容差，"
+                      f"跳过后续 Zemax 写入。请检查 bfd_actual 输入或重新运行 Gaussianoptics。")
+                _bfd_reject = True
+            else:
+                print(f"  [bfd_actual PASS] delta={_bfd_delta:.3f}mm ≤ 2.0mm")
+                _bfd_reject = False
+        else:
+            if _bfl_ideal_for_bfd is None:
+                print(f"  [bfd_actual] CSV 无 BFL_Ideal，跳过检查")
+            _bfd_reject = False
+        # ── bfd_actual 检查结束 ──────────────────────────────────────
 
             _sys_opt_done = False
 
