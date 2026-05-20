@@ -552,6 +552,7 @@ class ActionGUI:
         self._var_bfl_min   = tk.StringVar(value='8.0')
         self._var_bfl_max   = tk.StringVar(value='12.0')
         self._var_bfd_actual = tk.StringVar(value='8.0')
+        self._var_ttl_actual = tk.StringVar(value='105.0')
 
         # 像差权重
         self._var_wSI   = tk.StringVar(value='5.0')
@@ -597,6 +598,7 @@ class ActionGUI:
             ("BFL 下限 (mm)", self._var_bfl_min, "G4 后表面→像面距离最小值"),
             ("BFL 上限 (mm)", self._var_bfl_max, "G4 后表面→像面距离最大值"),
             ("法兰距 bfd_actual (mm)", self._var_bfd_actual, "G4 后顶点→传感器物理距离"),
+            ("镜头桶总长 TTL_actual (mm)", self._var_ttl_actual, "G1 前顶点→传感器物理总长"),
         ], start=3):
             ctk.CTkLabel(sys_frame, text=lbl).grid(row=r, column=0, sticky='w', pady=2)
             _f = ctk.CTkFrame(sys_frame, fg_color='transparent')
@@ -1045,6 +1047,7 @@ class ActionGUI:
                 'bfl_min':        float(self._var_bfl_min.get()),
                 'bfl_max':        float(self._var_bfl_max.get()),
                 'bfd_actual':     float(self._var_bfd_actual.get()),
+                'ttl_actual':     float(self._var_ttl_actual.get()),
                 'weights':        weights,
             },
         }
@@ -1100,6 +1103,7 @@ class ActionGUI:
             'bfl_min':      self._var_bfl_min.get(),
             'bfl_max':      self._var_bfl_max.get(),
             'bfd_actual':   self._var_bfd_actual.get(),
+            'ttl_actual':   self._var_ttl_actual.get(),
             'wSI':   self._var_wSI.get(),
             'wSII':  self._var_wSII.get(),
             'wSIII': self._var_wSIII.get(),
@@ -1155,6 +1159,7 @@ class ActionGUI:
         _set(self._var_bfl_min,'bfl_min')
         _set(self._var_bfl_max,'bfl_max')
         _set(self._var_bfd_actual,'bfd_actual')
+        _set(self._var_ttl_actual,'ttl_actual')
         _set(self._var_wSI,    'wSI')
         _set(self._var_wSII,   'wSII')
         _set(self._var_wSIII,  'wSIII')

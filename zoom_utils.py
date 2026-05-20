@@ -233,6 +233,8 @@ def parse_csv_metadata(csv_path, encoding='utf-8-sig'):
                             metadata['stop_shift'] = float(value)
                         elif key == 'bfl_ideal':
                             metadata['bfl_ideal'] = float(value)
+                        elif key == 'ttl_ideal':
+                            metadata['ttl_ideal'] = float(value)
                         elif key == 'bfd_target':
                             # deprecated fallback，兼容旧 CSV，R6 阶段删除
                             if 'bfl_ideal' not in metadata:
