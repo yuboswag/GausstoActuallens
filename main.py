@@ -758,6 +758,8 @@ def run_action_a_pipeline(params: dict):
                 )
             else:
                 _sys_csv_meta = {}
+            _bfd_target      = float(sys_cfg.get('bfd_actual', 8.0))
+            _ttl_actual_user = float(sys_cfg.get('ttl_actual', 0.0))
             _dH_G1  = group_principal_planes[0][0]   # G1 前主面偏移
             _dHp_G4 = group_principal_planes[3][1]   # G4 后主面偏移
             _ttl_ideal_csv = _sys_csv_meta.get('ttl_ideal', None)
