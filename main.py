@@ -40,25 +40,29 @@ import os
 import sys
 from pathlib import Path
 from typing import Any
-# ─── 临时调试: 把所有 print/异常输出同时写到 run_log.txt ───
-class _Tee:
-    def __init__(self, *streams):
-        self.streams = streams
-    def write(self, data):
-        for s in self.streams:
-            try:
-                s.write(data); s.flush()
-            except Exception:
-                pass
-    def flush(self):
-        for s in self.streams:
-            try: s.flush()
-            except Exception: pass
+# ─── 调试日志备份: 仅命令行直跑 main.py 时启用，GUI 调用时跳过 ───
+# 原"临时调试"代码会无条件用 _Tee 覆盖 sys.stdout，导致 GUI 的 _QueueWriter
+# 重定向失效（GUI 精简日志/落盘只有首行）。改为：先检查 sys.stdout 是否
+# 已被外部重定向，已重定向则跳过本段（GUI 走 _QueueWriter，run_log.txt 不创建）。
+if sys.stdout is sys.__stdout__:
+    class _Tee:
+        def __init__(self, *streams):
+            self.streams = streams
+        def write(self, data):
+            for s in self.streams:
+                try:
+                    s.write(data); s.flush()
+                except Exception:
+                    pass
+        def flush(self):
+            for s in self.streams:
+                try: s.flush()
+                except Exception: pass
 
-_log_file = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                              'run_log.txt'), 'w', encoding='utf-8')
-sys.stdout = _Tee(sys.__stdout__, _log_file)
-sys.stderr = _Tee(sys.__stderr__, _log_file)
+    _log_file = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  'run_log.txt'), 'w', encoding='utf-8')
+    sys.stdout = _Tee(sys.__stdout__, _log_file)
+    sys.stderr = _Tee(sys.__stderr__, _log_file)
 # ─── 调试段结束 ───
 
 import numpy as np
@@ -254,6 +258,11 @@ def run_action_a_pipeline(params: dict):
     S_SYSTEM_FNUM_TELE      = float(_fnum_tele) if _fnum_tele not in (None, '', 'None') else None
     S_SYSTEM_SENSOR_DIAG_MM = float(sys_cfg.get('sensor_diag_mm', 7.6))
     SYSTEM_ABERR_WEIGHTS    = sys_cfg.get('weights') or None
+    # BFL 硬约束区间（来自 GUI；BFD 由 Gaussianoptics CSV 提供，BFL = BFD + δH'_G4）
+    _bfl_min_raw = sys_cfg.get('bfl_min')
+    _bfl_max_raw = sys_cfg.get('bfl_max')
+    S_SYSTEM_BFL_MIN = float(_bfl_min_raw) if _bfl_min_raw not in (None, '', 'None') else None
+    S_SYSTEM_BFL_MAX = float(_bfl_max_raw) if _bfl_max_raw not in (None, '', 'None') else None
 
     # ══════════════════════════════════════════════════════════════════
     #  search 模式
@@ -792,15 +801,24 @@ def run_action_a_pipeline(params: dict):
                             )
                             print(f"  光阑面绝对索引（组元索引+偏移计算）: {_sys_stop_idx}")
 
-                            # ── 从 CSV 元数据读取 G4 δH' 软约束目标值 ────
+                            # ── 从 CSV 元数据读取 BFD 与 G4 δH'（BFL 来自 GUI）────
                             _sys_csv_meta = parse_csv_metadata(_sys_csv_path)
-                            _target_dHp_G4 = _sys_csv_meta.get('delta_hp_g4', None)
-                            _w_dHp_G4 = 1.0   # 与 SI/SII 同量级，后续根据诊断表调整
-                            if _target_dHp_G4 is not None:
-                                print(f"  G4 δH' 软约束: target={_target_dHp_G4:+.3f}mm, "
-                                      f"w={_w_dHp_G4}")
+                            _bfd_target = _sys_csv_meta.get('bfl_ideal', None)
+                            if _bfd_target is None:
+                                print(f"  ⚠ CSV 无 BFL_Ideal 元数据，回退硬编码 8.0mm")
+                                _bfd_target = 8.0
+
+                            # G4 δH' 软约束已被 BFL 硬约束取代（默认禁用，保留代码便于回退）
+                            # 如需启用旧机制，把下行改回:  _sys_csv_meta.get('delta_hp_g4', None)
+                            _target_dHp_G4 = None
+                            _w_dHp_G4 = 1.0
+
+                            # BFL 硬约束（GUI 输入）
+                            if S_SYSTEM_BFL_MIN is not None and S_SYSTEM_BFL_MAX is not None:
+                                print(f"  BFL 硬约束: BFD={_bfd_target:+.3f}mm, "
+                                      f"区间=[{S_SYSTEM_BFL_MIN:.3f}, {S_SYSTEM_BFL_MAX:.3f}]mm（来自 GUI）")
                             else:
-                                print(f"  ℹ CSV 无 DELTA_HP_G4 元数据，跳过 G4 δH' 软约束")
+                                print(f"  ℹ GUI 未填写 BFL 区间，跳过 BFL 硬约束")
 
                             _best_combos = find_best_combinations(
                                 all_group_candidates = auto_group_candidates,
@@ -812,6 +830,9 @@ def run_action_a_pipeline(params: dict):
                                 weights              = SYSTEM_ABERR_WEIGHTS,
                                 target_dHp_G4        = _target_dHp_G4,
                                 w_dHp_G4             = _w_dHp_G4,
+                                bfd                  = _bfd_target,
+                                bfl_min              = S_SYSTEM_BFL_MIN,
+                                bfl_max              = S_SYSTEM_BFL_MAX,
                             )
 
                             if _best_combos:
@@ -881,15 +902,27 @@ def run_action_a_pipeline(params: dict):
                 try:
                     # ── BFD 从 CSV 元数据读取（替代硬编码 8.0）─────
                     _csv_meta_bfd = parse_csv_metadata(_sys_csv_path_pp)
-                    _bfd_from_csv = _csv_meta_bfd.get('bfd_target', None)
-                    _bfl_min     = _csv_meta_bfd.get('bfl_min', 8.0)
+                    _bfd_from_csv = _csv_meta_bfd.get('bfl_ideal', None)
+                    # BFL 来源优先级: GUI > CSV(向后兼容) > 默认 8.0
+                    if S_SYSTEM_BFL_MIN is not None and S_SYSTEM_BFL_MAX is not None:
+                        _bfl_min_log = S_SYSTEM_BFL_MIN
+                        _bfl_max_log = S_SYSTEM_BFL_MAX
+                        _bfl_source  = "GUI"
+                    else:
+                        _bfl_min_log = _csv_meta_bfd.get('bfl_min', 8.0)
+                        _bfl_max_log = None
+                        _bfl_source  = "CSV(fallback)"
                     if _bfd_from_csv is None:
-                        print(f"  ⚠ CSV 无 BFD_TARGET 元数据，回退硬编码 8.0mm")
+                        print(f"  ⚠ CSV 无 BFL_Ideal 元数据，回退硬编码 8.0mm")
                         _bfd_used = 8.0
                     else:
                         _bfd_used = _bfd_from_csv
-                        print(f"  ℹ BFD={_bfd_used:+.3f}mm, "
-                              f"BFL_MIN={_bfl_min:.3f}mm（来自 CSV）")
+                        if _bfl_max_log is not None:
+                            print(f"  ℹ BFD={_bfd_used:+.3f}mm, "
+                                  f"BFL=[{_bfl_min_log:.3f},{_bfl_max_log:.3f}]mm（{_bfl_source}）")
+                        else:
+                            print(f"  ℹ BFD={_bfd_used:+.3f}mm, "
+                                  f"BFL_MIN={_bfl_min_log:.3f}mm（{_bfl_source}）")
 
                     _raw_zoom_cfgs = load_zoom_configs_for_zemax(
                         csv_path  = _sys_csv_path_pp,

@@ -231,8 +231,13 @@ def parse_csv_metadata(csv_path, encoding='utf-8-sig'):
                             metadata['stop_group'] = int(value)
                         elif key == 'stop_shift':
                             metadata['stop_shift'] = float(value)
-                        elif key in ('f_number_wide', 'f_number_tele', 'sensor_size',
-                                     'bfd_target', 'bfl_min', 'delta_hp_g4'):
+                        elif key == 'bfl_ideal':
+                            metadata['bfl_ideal'] = float(value)
+                        elif key == 'bfd_target':
+                            # deprecated fallback，兼容旧 CSV，R6 阶段删除
+                            if 'bfl_ideal' not in metadata:
+                                metadata['bfl_ideal'] = float(value)
+                        elif key in ('f_number_wide', 'f_number_tele', 'sensor_size'):
                             metadata[key] = float(value)
                     except ValueError:
                         pass  # 解析失败则跳过
