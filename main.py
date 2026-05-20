@@ -750,9 +750,17 @@ def run_action_a_pipeline(params: dict):
                 print(f"  {ALL_GROUPS[_gi_pp]['name']}: delta_H={_dH:+.4f} mm, delta_Hp={_dHp:+.4f} mm")
 
             # ── TTL_actual 硬拒绝检查 ─────────────────────────────────────
+            # 提前读取 CSV 元数据（_sys_csv_meta 在联合优化块内才赋值，此处需提前读取）
+            if S_SYSTEM_GAP_CSV is not None and Path(S_SYSTEM_GAP_CSV).exists():
+                _sys_csv_meta = parse_csv_metadata(
+                    S_SYSTEM_GAP_CSV if S_SYSTEM_GAP_CSV.is_absolute()
+                    else Path(__file__).parent / S_SYSTEM_GAP_CSV
+                )
+            else:
+                _sys_csv_meta = {}
             _dH_G1  = group_principal_planes[0][0]   # G1 前主面偏移
             _dHp_G4 = group_principal_planes[3][1]   # G4 后主面偏移
-            _ttl_ideal_csv = _sys_csv_meta.get('ttl_ideal', None) if '_sys_csv_meta' in dir() else None
+            _ttl_ideal_csv = _sys_csv_meta.get('ttl_ideal', None)
             if _ttl_ideal_csv is not None and _ttl_actual_user > 0.0:
                 _ttl_computed = _ttl_ideal_csv - _dH_G1 + _dHp_G4
                 _ttl_delta = abs(_ttl_computed - _ttl_actual_user)
@@ -775,7 +783,7 @@ def run_action_a_pipeline(params: dict):
             # ── TTL_actual 检查结束 ─────────────────────────────────────
 
             # ── bfd_actual 硬拒绝检查 ────────────────────────────────────
-            _bfl_ideal_for_bfd = _sys_csv_meta.get('bfl_ideal', None) if '_sys_csv_meta' in dir() else None
+            _bfl_ideal_for_bfd = _sys_csv_meta.get('bfl_ideal', None)
             if _bfl_ideal_for_bfd is not None and _bfd_target > 0.0:
                 _bfd_computed = _bfl_ideal_for_bfd - _dHp_G4
                 _bfd_delta = abs(_bfd_computed - _bfd_target)
