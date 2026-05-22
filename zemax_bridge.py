@@ -1084,9 +1084,10 @@ class ZemaxBridge:
         # ===== 预校正结束 =====
 
         #    使用递增索引插入，确保 Action_a 面 0 对应 Surface 1
-        for i in range(1, 27):  # i 从 1 到 26
+        n_optical = len(surface_prescription)
+        for i in range(1, n_optical + 1):
             TheLDE.InsertNewSurfaceAt(i)  # 在 index i 插入，新面成为 Surface i
-        print(f"[write_zoom_system] 已插入 26 个面，总面数 = {TheLDE.NumberOfSurfaces}")
+        print(f"[write_zoom_system] 已插入 {n_optical} 个面，总面数 = {TheLDE.NumberOfSurfaces}")
 
         # 6. 逐面设置 Radius、Thickness、Material
         for idx, desc, R, n_out, t_after, glass in surface_prescription:
@@ -1100,8 +1101,8 @@ class ZemaxBridge:
             surf.Comment = desc
 
         # 7. 修正最后一面厚度为 BFD
-        last_surf = TheLDE.GetSurfaceAt(26)  # Action_a 面25 → Surface 26
-        last_surf.Thickness = bfd_mm  # 8.0mm
+        last_surf = TheLDE.GetSurfaceAt(n_optical)  # 最后一个光学面 → IMA 前一面
+        last_surf.Thickness = bfd_mm
 
         # 8. 设置光阑面
         stop_surf_num = stop_surface_idx + 1  # Action_a 面14 → Surface 15

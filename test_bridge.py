@@ -95,14 +95,19 @@ def _load_all_from_json(json_path):
     from zoom_utils import correct_zoom_spacings
     corrected = correct_zoom_spacings(raw_tuples, group_pp)
 
-    return prescription, corrected
+    # G4 后主面偏移，用于把 paraxial BFD 转成物理 BFL
+    delta_Hp_G4_achieved = group_pp[3][1]
+
+    return prescription, corrected, delta_Hp_G4_achieved
 
 
 # 加载
 print("\n[从 last_run_config.json 加载面处方和修正间距]")
+DELTA_HP_G4 = 0.0  # 默认 0，JSON 加载成功后覆盖
 try:
-    SURFACE_PRESCRIPTION, ZOOM_CONFIGS = _load_all_from_json(_CONFIG_JSON)
+    SURFACE_PRESCRIPTION, ZOOM_CONFIGS, DELTA_HP_G4 = _load_all_from_json(_CONFIG_JSON)
     print(f"  ✅ 加载成功：{len(SURFACE_PRESCRIPTION)} 个面，{len(ZOOM_CONFIGS)} 个配置")
+    print(f"  G4 后主面偏移 δH'_G4 = {DELTA_HP_G4:+.4f} mm（写 Zemax 时补偿）")
 except Exception as e:
     print(f"  ❌ JSON 加载失败原因：{e}")
     print(f"  ⚠ 回退到硬编码面数据 + CSV 原始间距（EPD 将按 F/# 线性插值）")
@@ -145,7 +150,12 @@ WAVELENGTH_UM = 0.587056        # 主波长（d 线）
 WAVELENGTHS_UM = [0.55, 0.45, 0.65]   # 主波长在第一个，可见光三波长
 SENSOR_HALF_DIAG_MM = 3.8       # 传感器半对角线
 STOP_SURFACE_IDX = 14           # 光阑面的 Action_a 编号
-BFD_MM = 8.0                    # 最后一面到像面的距离
+# BFD 语义说明：
+#   BFD_PARAXIAL = Gaussianoptics paraxial BFD（G4 后主面 H'_G4 → 像面，可正可负）
+#   BFL_PHYSICAL = Zemax LDE 末段空气厚度（G4 后表面 V'_G4 → 像面）
+#   关系：BFL_PHYSICAL = BFD_PARAXIAL + δH'_G4_achieved
+BFD_PARAXIAL = 8.0              # 与 CSV BFD_TARGET 保持一致（暂硬编码，未来从 CSV 读）
+BFL_PHYSICAL = BFD_PARAXIAL + DELTA_HP_G4  # 实际写到 Zemax 最后一面的 thickness
 
 # 保存路径
 SAVE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -219,7 +229,7 @@ def run_test():
                 wavelengths_um=WAVELENGTHS_UM,
                 sensor_half_diag_mm=SENSOR_HALF_DIAG_MM,
                 stop_surface_idx=STOP_SURFACE_IDX,
-                bfd_mm=BFD_MM
+                bfd_mm=BFL_PHYSICAL
             )
             pass_msg("write_zoom_system 调用成功")
         except Exception as e:
@@ -237,11 +247,11 @@ def run_test():
             surfaces = sys_info['surfaces']
 
             print(f"  总面数: {num_surf}")
-            print(f"  期望面数: 28 (OBJ + 26 插入面 + IMA)")
-            if num_surf == 28:
+            print(f"  期望面数: 29 (OBJ + 27 插入面 + IMA)")
+            if num_surf == 29:
                 pass_msg("面数正确")
             else:
-                fail_msg(f"面数不正确，期望 28，实际 {num_surf}")
+                fail_msg(f"面数不正确，期望 29，实际 {num_surf}")
                 all_pass = False
 
             # 打印前几个面的关键信息
@@ -273,10 +283,10 @@ def run_test():
 
             # 检查最后一面厚度
             last_surf = surfaces[-2]  # 倒数第二面是 Surface 26（IMA 之前）
-            if abs(last_surf['thickness'] - BFD_MM) < 0.001:
+            if abs(last_surf['thickness'] - BFL_PHYSICAL) < 0.001:
                 pass_msg(f"最后一面厚度 = {last_surf['thickness']:.3f} mm（正确）")
             else:
-                fail_msg(f"最后一面厚度 = {last_surf['thickness']:.3f} mm，期望 {BFD_MM} mm")
+                fail_msg(f"最后一面厚度 = {last_surf['thickness']:.3f} mm，期望 {BFL_PHYSICAL} mm")
                 all_pass = False
 
         except Exception as e:
