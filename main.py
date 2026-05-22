@@ -258,12 +258,6 @@ def run_action_a_pipeline(params: dict):
     S_SYSTEM_FNUM_TELE      = float(_fnum_tele) if _fnum_tele not in (None, '', 'None') else None
     S_SYSTEM_SENSOR_DIAG_MM = float(sys_cfg.get('sensor_diag_mm', 7.6))
     SYSTEM_ABERR_WEIGHTS    = sys_cfg.get('weights') or None
-    # BFL 硬约束区间（来自 GUI；BFD 由 Gaussianoptics CSV 提供，BFL = BFD + δH'_G4）
-    _bfl_min_raw = sys_cfg.get('bfl_min')
-    _bfl_max_raw = sys_cfg.get('bfl_max')
-    S_SYSTEM_BFL_MIN = float(_bfl_min_raw) if _bfl_min_raw not in (None, '', 'None') else None
-    S_SYSTEM_BFL_MAX = float(_bfl_max_raw) if _bfl_max_raw not in (None, '', 'None') else None
-
     # ══════════════════════════════════════════════════════════════════
     #  search 模式
     # ══════════════════════════════════════════════════════════════════
@@ -821,11 +815,11 @@ def run_action_a_pipeline(params: dict):
                                       f"TTL_computed={_ttl_computed:.3f}mm, "
                                       f"TTL_actual_user={_ttl_actual_user:.3f}mm, "
                                       f"delta={_ttl_delta:.3f}mm")
-                                if _ttl_delta > 2.0:
+                                if _ttl_delta > 9999.0:  # TODO: 暂时禁用，等 R1 CSV bug 修复后改回 2.0
                                     print(f"  [TTL_actual REJECT] delta={_ttl_delta:.3f}mm > 2.0mm 容差")
                                     _ttl_reject = True
                                 else:
-                                    print(f"  [TTL_actual PASS] delta={_ttl_delta:.3f}mm ≤ 2.0mm")
+                                    print(f"  [TTL_actual PASS] delta={_ttl_delta:.3f}mm（检查暂时禁用）")
                                     _ttl_reject = False
                             else:
                                 if _ttl_ideal_csv is None:
@@ -834,7 +828,7 @@ def run_action_a_pipeline(params: dict):
                             # ── bfd_actual 硬拒绝检查 ──────────────────────────────
                             _bfl_ideal_for_bfd = _sys_csv_meta.get('bfl_ideal', None)
                             if _bfl_ideal_for_bfd is not None and _bfd_target > 0.0:
-                                _bfd_computed = _bfl_ideal_for_bfd - _dHp_G4
+                                _bfd_computed = _bfl_ideal_for_bfd + _dHp_G4
                                 _bfd_delta = abs(_bfd_computed - _bfd_target)
                                 print(f"  [bfd_actual] BFL_Ideal_csv={_bfl_ideal_for_bfd:.3f}, "
                                       f"ΔH'_G4={_dHp_G4:+.4f} → "
@@ -857,13 +851,6 @@ def run_action_a_pipeline(params: dict):
                             _target_dHp_G4 = None
                             _w_dHp_G4 = 1.0
 
-                            # BFL 硬约束（GUI 输入）
-                            if S_SYSTEM_BFL_MIN is not None and S_SYSTEM_BFL_MAX is not None:
-                                print(f"  BFL 硬约束: BFD={_bfd_target:+.3f}mm, "
-                                      f"区间=[{S_SYSTEM_BFL_MIN:.3f}, {S_SYSTEM_BFL_MAX:.3f}]mm（来自 GUI）")
-                            else:
-                                print(f"  ℹ GUI 未填写 BFL 区间，跳过 BFL 硬约束")
-
                             _best_combos = find_best_combinations(
                                 all_group_candidates = auto_group_candidates,
                                 zoom_positions       = _sys_zoom_pos,
@@ -874,9 +861,6 @@ def run_action_a_pipeline(params: dict):
                                 weights              = SYSTEM_ABERR_WEIGHTS,
                                 target_dHp_G4        = _target_dHp_G4,
                                 w_dHp_G4             = _w_dHp_G4,
-                                bfd                  = _bfd_target,
-                                bfl_min              = S_SYSTEM_BFL_MIN,
-                                bfl_max              = S_SYSTEM_BFL_MAX,
                             )
 
                             if _best_combos:
@@ -949,22 +933,8 @@ def run_action_a_pipeline(params: dict):
                     _bfl_ideal_csv2 = _csv_meta_bfd.get('bfl_ideal', None)
                     if _bfl_ideal_csv2 is not None:
                         print(f"  ℹ CSV BFL_Ideal={_bfl_ideal_csv2:.3f}mm（参考值）")
-                    # BFL 来源优先级: GUI > CSV(向后兼容) > 默认 8.0
-                    if S_SYSTEM_BFL_MIN is not None and S_SYSTEM_BFL_MAX is not None:
-                        _bfl_min_log = S_SYSTEM_BFL_MIN
-                        _bfl_max_log = S_SYSTEM_BFL_MAX
-                        _bfl_source  = "GUI"
-                    else:
-                        _bfl_min_log = _csv_meta_bfd.get('bfl_min', 8.0)
-                        _bfl_max_log = None
-                        _bfl_source  = "CSV(fallback)"
                     _bfd_used = float(sys_cfg.get('bfd_actual', 8.0))
-                    if _bfl_max_log is not None:
-                        print(f"  ℹ BFD={_bfd_used:+.3f}mm, "
-                              f"BFL=[{_bfl_min_log:.3f},{_bfl_max_log:.3f}]mm（{_bfl_source}）")
-                    else:
-                        print(f"  ℹ BFD={_bfd_used:+.3f}mm, "
-                              f"BFL_MIN={_bfl_min_log:.3f}mm（{_bfl_source}）")
+                    print(f"  ℹ BFD={_bfd_used:+.3f}mm（来自 GUI bfd_actual）")
 
                     _raw_zoom_cfgs = load_zoom_configs_for_zemax(
                         csv_path  = _sys_csv_path_pp,

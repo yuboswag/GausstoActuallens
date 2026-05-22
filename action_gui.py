@@ -548,9 +548,6 @@ class ActionGUI:
         self._var_sensor    = tk.StringVar(value='7.6')
         self._var_sys_srch  = tk.StringVar(value='30')
         self._var_sys_cand  = tk.StringVar(value='10')
-        # BFL 硬约束区间（BFL = BFD + δH'_G4，BFD 由 Gaussianoptics CSV 提供）
-        self._var_bfl_min   = tk.StringVar(value='8.0')
-        self._var_bfl_max   = tk.StringVar(value='12.0')
         self._var_bfd_actual = tk.StringVar(value='8.0')
         self._var_ttl_actual = tk.StringVar(value='105.0')
 
@@ -595,8 +592,6 @@ class ActionGUI:
             ("传感器对角线(mm)", self._var_sensor,""),
             ("系统搜索候选数",self._var_sys_srch, "auto模式"),
             ("系统保留候选数",self._var_sys_cand, "auto模式"),
-            ("BFL 下限 (mm)", self._var_bfl_min, "G4 后表面→像面距离最小值"),
-            ("BFL 上限 (mm)", self._var_bfl_max, "G4 后表面→像面距离最大值"),
             ("法兰距 bfd_actual (mm)", self._var_bfd_actual, "G4 后顶点→传感器物理距离"),
             ("镜头桶总长 TTL_actual (mm)", self._var_ttl_actual, "G1 前顶点→传感器物理总长"),
         ], start=3):
@@ -1044,8 +1039,6 @@ class ActionGUI:
                 'fnum_wide':      float(self._var_fnum_w.get()),
                 'fnum_tele':      fnum_tele,
                 'sensor_diag_mm': float(self._var_sensor.get()),
-                'bfl_min':        float(self._var_bfl_min.get()),
-                'bfl_max':        float(self._var_bfl_max.get()),
                 'bfd_actual':     float(self._var_bfd_actual.get()),
                 'ttl_actual':     float(self._var_ttl_actual.get()),
                 'weights':        weights,
@@ -1100,8 +1093,6 @@ class ActionGUI:
             'fnum_w':       self._var_fnum_w.get(),
             'fnum_t':       self._var_fnum_t.get(),
             'sensor':       self._var_sensor.get(),
-            'bfl_min':      self._var_bfl_min.get(),
-            'bfl_max':      self._var_bfl_max.get(),
             'bfd_actual':   self._var_bfd_actual.get(),
             'ttl_actual':   self._var_ttl_actual.get(),
             'wSI':   self._var_wSI.get(),
@@ -1156,8 +1147,6 @@ class ActionGUI:
         _set(self._var_fnum_w, 'fnum_w')
         _set(self._var_fnum_t, 'fnum_t')
         _set(self._var_sensor, 'sensor')
-        _set(self._var_bfl_min,'bfl_min')
-        _set(self._var_bfl_max,'bfl_max')
         _set(self._var_bfd_actual,'bfd_actual')
         _set(self._var_ttl_actual,'ttl_actual')
         _set(self._var_wSI,    'wSI')
