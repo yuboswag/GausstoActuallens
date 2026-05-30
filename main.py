@@ -801,30 +801,9 @@ def run_action_a_pipeline(params: dict):
                             if _bfl_ideal_csv is not None:
                                 print(f"  ℹ CSV BFL_Ideal={_bfl_ideal_csv:.3f}mm（参考值，实际用 GUI bfd_actual）")
                             _bfd_target = float(sys_cfg.get('bfd_actual', 8.0))
-                            _ttl_actual_user = float(sys_cfg.get('ttl_actual', 0.0))
-                            print(f"  ℹ bfd_actual={_bfd_target:.3f}mm，TTL_actual={_ttl_actual_user:.3f}mm（来自 GUI）")
-                            # ── TTL_actual 硬拒绝检查 ──────────────────────────────
+                            print(f"  ℹ bfd_actual={_bfd_target:.3f}mm（来自 GUI）")
                             _dH_G1  = group_principal_planes[0][0]
                             _dHp_G4 = group_principal_planes[3][1]
-                            _ttl_ideal_csv = _sys_csv_meta.get('ttl_ideal', None)
-                            if _ttl_ideal_csv is not None and _ttl_actual_user > 0.0:
-                                _ttl_computed = _ttl_ideal_csv - _dH_G1 + _dHp_G4
-                                _ttl_delta = abs(_ttl_computed - _ttl_actual_user)
-                                print(f"  [TTL_actual] TTL_Ideal_csv={_ttl_ideal_csv:.3f}, "
-                                      f"ΔH_G1={_dH_G1:+.4f}, ΔH'_G4={_dHp_G4:+.4f} → "
-                                      f"TTL_computed={_ttl_computed:.3f}mm, "
-                                      f"TTL_actual_user={_ttl_actual_user:.3f}mm, "
-                                      f"delta={_ttl_delta:.3f}mm")
-                                if _ttl_delta > 9999.0:  # TODO: 暂时禁用，等 R1 CSV bug 修复后改回 2.0
-                                    print(f"  [TTL_actual REJECT] delta={_ttl_delta:.3f}mm > 2.0mm 容差")
-                                    _ttl_reject = True
-                                else:
-                                    print(f"  [TTL_actual PASS] delta={_ttl_delta:.3f}mm（检查暂时禁用）")
-                                    _ttl_reject = False
-                            else:
-                                if _ttl_ideal_csv is None:
-                                    print(f"  [TTL_actual] CSV 无 TTL_Ideal，跳过检查")
-                                _ttl_reject = False
                             # ── bfd_actual 硬拒绝检查 ──────────────────────────────
                             _bfl_ideal_for_bfd = _sys_csv_meta.get('bfl_ideal', None)
                             if _bfl_ideal_for_bfd is not None and _bfd_target > 0.0:
