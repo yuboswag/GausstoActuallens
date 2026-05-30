@@ -12,7 +12,7 @@ from scipy.optimize import brentq, minimize_scalar, minimize
 from zoom_utils import compute_pbar_from_zoom_data, load_zoom_ray_csv
 
 # 5c EFL 缩放总开关 (模块级常量, 供调用方查询)
-ENABLE_5C_SCALING = False  # [策略2实验] 关闭 5c 缩放, R 保留 SLSQP 输出
+ENABLE_5C_SCALING = True  # [策略2实验] 关闭 5c 缩放, R 保留 SLSQP 输出
 
 def compute_principal_planes(surfaces_data, thicknesses_data, nd_values_dict,
                              glass_names_list, spacings_mm_list, cemented_pairs_list):

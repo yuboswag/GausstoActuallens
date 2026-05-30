@@ -1076,6 +1076,7 @@ def refine_combination(
 
         new_combo: List[GroupCandidate] = []
         for gi, cand in enumerate(best_combo):
+            _k_grp = cand.struct_result.get('scale_factor_applied', 1.0)
             has_single  = bool(group_var_map[gi])
             has_cemented = bool(cem_front_map[gi]) or bool(cem_rear_map[gi])
 
@@ -1095,19 +1096,21 @@ def refine_combination(
                     visit_count[s_li] = cnt + 1
                     q_new, phi_i, n_i = group_var_map[gi][s_li]
                     R1_new, R2_new = _radii_from_q(q_new, phi_i, n_i)
+                    R1_new = R1_new / _k_grp
+                    R2_new = R2_new / _k_grp
                     new_surfaces.append((s_desc, R1_new if cnt == 0 else R2_new,
                                          s_li, s_is_cem))
                 elif not s_is_cem and s_li in cem_front_map[gi]:
                     # 胶合对第一片的外前表面
-                    new_surfaces.append((s_desc, cem_front_map[gi][s_li],
+                    new_surfaces.append((s_desc, cem_front_map[gi][s_li] / _k_grp,
                                          s_li, s_is_cem))
                 elif s_is_cem and s_li in cem_cem_map[gi]:
                     # 胶合面（is_cem=True，lens_idx 为前片索引）
-                    new_surfaces.append((s_desc, cem_cem_map[gi][s_li],
+                    new_surfaces.append((s_desc, cem_cem_map[gi][s_li] / _k_grp,
                                          s_li, s_is_cem))
                 elif not s_is_cem and s_li in cem_rear_map[gi]:
                     # 胶合对第二片的外后表面
-                    new_surfaces.append((s_desc, cem_rear_map[gi][s_li],
+                    new_surfaces.append((s_desc, cem_rear_map[gi][s_li] / _k_grp,
                                          s_li, s_is_cem))
                 else:
                     new_surfaces.append(s)
