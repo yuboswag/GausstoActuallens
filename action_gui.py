@@ -438,47 +438,6 @@ class ActionGUI:
             row=row, column=0, columnspan=2, pady=(0, 6), sticky='w')
         row += 1
 
-        # ── 模式选择（2×2 卡片）──────────────────────────────────────
-        self._var_mode = tk.StringVar(value='auto')
-        self._mode_cards = {}
-
-        mode_frame = ctk.CTkFrame(p)
-        mode_frame.grid(row=row, column=0, columnspan=2, sticky='ew', pady=4, padx=4)
-        row += 1
-
-        _MODES = [
-            ('search',    '① search',    '穷举搜索'),
-            ('structure', '② structure', '计算结构'),
-            ('auto',      '③ auto',      '搜索→结构一键通'),
-            ('seidel',    '④ seidel',    '系统像差诊断'),
-        ]
-
-        mode_inner = ctk.CTkFrame(mode_frame, fg_color="transparent")
-        mode_inner.pack(fill='x', padx=8, pady=8)
-        mode_inner.columnconfigure((0, 1), weight=1)
-
-        for i, (val, title, desc) in enumerate(_MODES):
-            r, c = divmod(i, 2)
-            card = ctk.CTkFrame(mode_inner, corner_radius=8, border_width=1,
-                                 border_color="gray40", cursor="hand2")
-            card.grid(row=r, column=c, padx=4, pady=4, sticky='ew')
-
-            lbl_title = ctk.CTkLabel(card, text=title, font=("", 12, "bold"),
-                                      anchor='w')
-            lbl_title.pack(padx=12, pady=(8, 0), anchor='w')
-            lbl_desc = ctk.CTkLabel(card, text=desc, font=("", 11),
-                                     text_color="gray", anchor='w')
-            lbl_desc.pack(padx=12, pady=(0, 8), anchor='w')
-
-            self._mode_cards[val] = {
-                'frame': card, 'title': lbl_title, 'desc': lbl_desc,
-            }
-
-            for widget in (card, lbl_title, lbl_desc):
-                widget.bind("<Button-1>", lambda e, v=val: self._select_mode(v))
-
-        self._refresh_mode_highlight()
-
         # ── 全局参数 ──────────────────────────────────────────────────
         glob_section = CollapsibleSection(p, title="全局参数", default_open=True)
         glob_section.grid(row=row, column=0, columnspan=2, sticky='ew', pady=4)
@@ -549,7 +508,7 @@ class ActionGUI:
         self._var_sys_srch  = tk.StringVar(value='30')
         self._var_sys_cand  = tk.StringVar(value='10')
         self._var_bfd_actual = tk.StringVar(value='8.0')
-        self._var_ttl_actual = tk.StringVar(value='105.0')
+
 
         # 像差权重
         self._var_wSI   = tk.StringVar(value='5.0')
@@ -593,7 +552,6 @@ class ActionGUI:
             ("系统搜索候选数",self._var_sys_srch, "auto模式"),
             ("系统保留候选数",self._var_sys_cand, "auto模式"),
             ("法兰距 bfd_actual (mm)", self._var_bfd_actual, "G4 后顶点→传感器物理距离"),
-            ("镜头桶总长 TTL_actual (mm)", self._var_ttl_actual, "G1 前顶点→传感器物理总长"),
         ], start=3):
             ctk.CTkLabel(sys_frame, text=lbl).grid(row=r, column=0, sticky='w', pady=2)
             _f = ctk.CTkFrame(sys_frame, fg_color='transparent')
@@ -763,21 +721,12 @@ class ActionGUI:
             fc.grid(row=0, column=ci, sticky='ew',
                     padx=(0 if ci == 0 else 2, 0 if ci == 3 else 2))
 
-        # ═══ 可折叠：第二步参数 ════════════════════════════════════
+        # ═══ 可折叠：高级参数（玻璃池/焦距约束/变焦列前缀）═══════════
         step2_section = CollapsibleSection(
-            tab, title="第二步参数（结构/赛德尔模式）", default_open=False)
+            tab, title="高级参数（玻璃池/约束）", default_open=False)
         step2_section.grid(row=row, column=0, sticky='ew', padx=4, pady=4)
         row += 1
         s2 = step2_section.content
-
-        for lbl, key, dv, hint in [
-            ("玻璃牌号",     'glass_names',      gdef['glass_names'],      '逗号分隔'),
-            ("各片焦距(mm)", 'focal_lengths_mm', gdef['focal_lengths_mm'], '逗号分隔'),
-            ("广义阿贝数",   'vgen_list',        gdef['vgen_list'],        '逗号分隔'),
-            ("折射率字典",   'nd_vals',          gdef['nd_vals'],          '空=自动，或 玻璃:n,...'),
-        ]:
-            fi, _ = _labeled_entry(s2, lbl, key, dv, hint=hint)
-            fi.pack(fill='x', pady=2)
 
         # 不常用参数（glass_roles / max_f_mm / zoom_csv_group）
         misc_frame = ctk.CTkFrame(s2, fg_color="transparent")
@@ -818,24 +767,6 @@ class ActionGUI:
             self._weights_frame.grid()
         else:
             self._weights_frame.grid_remove()
-
-    def _select_mode(self, mode: str):
-        """卡片点击回调：更新模式变量并刷新高亮。"""
-        self._var_mode.set(mode)
-        self._refresh_mode_highlight()
-
-    def _refresh_mode_highlight(self):
-        """根据 _var_mode 当前值刷新卡片高亮状态。"""
-        current = self._var_mode.get()
-        for val, widgets in self._mode_cards.items():
-            if val == current:
-                widgets['frame'].configure(border_color="#7c83ff", border_width=2)
-                widgets['title'].configure(text_color="#7c83ff")
-                widgets['desc'].configure(text_color="#9999cc")
-            else:
-                widgets['frame'].configure(border_color="gray40", border_width=1)
-                widgets['title'].configure(text_color=("gray10", "gray90"))
-                widgets['desc'].configure(text_color="gray")
 
     # ──────────────────────────────────────────────────────────────────
     #  浏览文件
@@ -1014,7 +945,7 @@ class ActionGUI:
         }
 
         return {
-            'run_mode':          self._var_mode.get(),
+            'run_mode':          'auto',
             'glass_xlsx':        self._var_xlsx.get().strip(),
             'lam_short_nm':      float(self._var_lam_s.get()),
             'lam_ref_nm':        float(self._var_lam_r.get()),
@@ -1040,7 +971,6 @@ class ActionGUI:
                 'fnum_tele':      fnum_tele,
                 'sensor_diag_mm': float(self._var_sensor.get()),
                 'bfd_actual':     float(self._var_bfd_actual.get()),
-                'ttl_actual':     float(self._var_ttl_actual.get()),
                 'weights':        weights,
             },
         }
@@ -1076,7 +1006,6 @@ class ActionGUI:
     def _collect_gui_raw(self) -> dict:
         """收集 GUI 原始字符串（用于 JSON 保存，方便还原）。"""
         raw = {
-            'run_mode':   self._var_mode.get(),
             'glass_xlsx': self._var_xlsx.get(),
             'lam_short_nm': self._var_lam_s.get(),
             'lam_ref_nm':   self._var_lam_r.get(),
@@ -1094,7 +1023,6 @@ class ActionGUI:
             'fnum_t':       self._var_fnum_t.get(),
             'sensor':       self._var_sensor.get(),
             'bfd_actual':   self._var_bfd_actual.get(),
-            'ttl_actual':   self._var_ttl_actual.get(),
             'wSI':   self._var_wSI.get(),
             'wSII':  self._var_wSII.get(),
             'wSIII': self._var_wSIII.get(),
@@ -1129,8 +1057,6 @@ class ActionGUI:
             if val is not None:
                 var.set(str(val))
 
-        self._var_mode.set(raw.get('run_mode', 'auto'))
-        self._refresh_mode_highlight()
         _set(self._var_xlsx,   'glass_xlsx')
         _set(self._var_lam_s,  'lam_short_nm')
         _set(self._var_lam_r,  'lam_ref_nm')
@@ -1148,7 +1074,6 @@ class ActionGUI:
         _set(self._var_fnum_t, 'fnum_t')
         _set(self._var_sensor, 'sensor')
         _set(self._var_bfd_actual,'bfd_actual')
-        _set(self._var_ttl_actual,'ttl_actual')
         _set(self._var_wSI,    'wSI')
         _set(self._var_wSII,   'wSII')
         _set(self._var_wSIII,  'wSIII')
