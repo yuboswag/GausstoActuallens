@@ -554,42 +554,56 @@ def run_action_a_pipeline(params: dict):
                     pbar_overrides   = _pbar_overrides,
                 )
 
-                # ═════════ Path A: rank-1 5c 失败时换候选 ═════════════════════
+                # ═════════ Top-N |k-1| 重排选择 (取代旧 Path A) ═══════════
+                # 旧 Path A 只避开 5c 彻底失败(k=1); 新逻辑在 top-N 中选
+                # "焦距天然可达"(|k-1| 最小)的候选, 阈值内优先光学评分最优.
+                _K_TOL = 0.15
                 _PATH_A_MAX_RANKS = 10
-                if _STRUCT_ENABLE_5C and abs(_struct_result.get('scale_factor_applied', 1.0) - 1.0) < 1e-9:
-                    print(f"  [Path A] {gp['name']} rank-1 5c 失败 (k=1.0), 试换候选")
-                    for _try_rank in range(1, min(_PATH_A_MAX_RANKS, len(results))):
-                        _cand_a = results[_try_rank]
-                        _sr_try = compute_initial_structure(
-                            glass_names      = _cand_a['names'],
-                            nd_values        = {n: nv for n, nv in zip(_cand_a['names'], _cand_a['ns'])},
-                            focal_lengths_mm = [1.0 / p for p in _cand_a['phis']],
-                            cemented_pairs   = _cem_pairs,
-                            spacings_mm      = _spacings,
-                            D_mm             = _d_mm,
-                            min_R_mm         = _min_r_mm,
-                            t_edge_min       = _t_edge,
-                            t_center_min     = _t_center,
-                            t_cemented_min   = _t_cemented,
-                            h1               = _d_mm / 2.0,
-                            u0               = 0.0,
-                            pbar_overrides   = _pbar_overrides,
-                        )
-                        _k_app_try = _sr_try.get('scale_factor_applied', 1.0)
-                        if abs(_k_app_try - 1.0) > 1e-9:
-                            _struct_result      = _sr_try
-                            best                = _cand_a
-                            _auto_glass_names   = _cand_a['names']
-                            _auto_nd_values     = {n: nv for n, nv in zip(_cand_a['names'], _cand_a['ns'])}
-                            _auto_focal_lengths = [1.0 / p for p in _cand_a['phis']]
-                            _auto_vgen_list     = _cand_a['Vgens']
-                            print(f"  [Path A] {gp['name']} 选用 rank-{_try_rank+1}: 5c k={_k_app_try:.4f}")
-                            break
-                        else:
-                            print(f"  [Path A] {gp['name']} rank-{_try_rank+1} 5c 失败 (k=1.0)")
+                if _STRUCT_ENABLE_5C:
+                    _n_scan = min(_PATH_A_MAX_RANKS, len(results))
+                    # rank-0 的 k (已在上方算过 _struct_result)
+                    _k0 = _struct_result.get('scale_factor_applied', 1.0)
+                    _best_pick = (0, _struct_result, best, abs(_k0 - 1.0))
+                    _accepted = abs(_k0 - 1.0) <= _K_TOL
+                    if not _accepted:
+                        # rank-0 不达标, 扫描 rank-1.. 找第一个达标(列表已按光学评分排,
+                        # 第一个达标者即阈值内光学最优); 同时记录全程 |k-1| 最小者兜底.
+                        for _try_rank in range(1, _n_scan):
+                            _cand_a = results[_try_rank]
+                            _sr_try = compute_initial_structure(
+                                glass_names      = _cand_a['names'],
+                                nd_values        = {n: nv for n, nv in zip(_cand_a['names'], _cand_a['ns'])},
+                                focal_lengths_mm = [1.0 / p for p in _cand_a['phis']],
+                                cemented_pairs   = _cem_pairs,
+                                spacings_mm      = _spacings,
+                                D_mm             = _d_mm,
+                                min_R_mm         = _min_r_mm,
+                                t_edge_min       = _t_edge,
+                                t_center_min     = _t_center,
+                                t_cemented_min   = _t_cemented,
+                                h1               = _d_mm / 2.0,
+                                u0               = 0.0,
+                                pbar_overrides   = _pbar_overrides,
+                            )
+                            _k_try = _sr_try.get('scale_factor_applied', 1.0)
+                            _dev_try = abs(_k_try - 1.0)
+                            if _dev_try < _best_pick[3]:
+                                _best_pick = (_try_rank, _sr_try, _cand_a, _dev_try)
+                            if _dev_try <= _K_TOL:
+                                _best_pick = (_try_rank, _sr_try, _cand_a, _dev_try)
+                                _accepted = True
+                                break
+                    _pick_rank, _struct_result, best, _pick_dev = _best_pick
+                    _auto_glass_names   = best['names']
+                    _auto_nd_values     = {n: nv for n, nv in zip(best['names'], best['ns'])}
+                    _auto_focal_lengths = [1.0 / p for p in best['phis']]
+                    _auto_vgen_list     = best['Vgens']
+                    _pick_k = _struct_result.get('scale_factor_applied', 1.0)
+                    if _accepted:
+                        print(f"  [Top-N重排] {gp['name']} 选 rank-{_pick_rank+1}: k={_pick_k:.4f} (|k-1|={_pick_dev:.3f} ≤ {_K_TOL}, 达标)")
                     else:
-                        print(f"  [Path A] {gp['name']} rank-1..{min(_PATH_A_MAX_RANKS, len(results))} 全失败, 兜底用 rank-1")
-                # ═════════ Path A 结束 ═══════════════════════════════════════
+                        print(f"  [Top-N重排] {gp['name']} 无候选达标, 选 |k-1| 最小 rank-{_pick_rank+1}: k={_pick_k:.4f} (|k-1|={_pick_dev:.3f})")
+                # ═════════ Top-N 重排结束 ═══════════════════════════════════
 
                 _group_cands = select_diverse_candidates(
                     search_results  = results,
@@ -881,12 +895,17 @@ def run_action_a_pipeline(params: dict):
                                     half_fov_rad   = _sys_fov,
                                 )
 
+                                # ⚠ 覆盖开关：默认 False，不让系统级联合优化覆盖
+                                #   Top-N |k-1| 重排选中的各组种子（重排是当前治本逻辑）。
+                                #   设 True 可回退到"系统级组合覆盖"旧行为。
+                                _ENABLE_SYSTEM_OPT_OVERRIDE = False
                                 _best_sys = _best_combo
-                                auto_struct_results  = [c.struct_result  for c in _best_sys]
-                                auto_all_glass_names = [c.glass_combo    for c in _best_sys]
-                                auto_all_nd_values   = [c.nd_values      for c in _best_sys]
-                                auto_all_vgen_lists  = [c.vgen_list      for c in _best_sys]
-                                _sys_opt_done = True
+                                if _ENABLE_SYSTEM_OPT_OVERRIDE:
+                                    auto_struct_results  = [c.struct_result  for c in _best_sys]
+                                    auto_all_glass_names = [c.glass_combo    for c in _best_sys]
+                                    auto_all_nd_values   = [c.nd_values      for c in _best_sys]
+                                    auto_all_vgen_lists  = [c.vgen_list      for c in _best_sys]
+                                    _sys_opt_done = True
 
                     except Exception as _e:
                         print(f"\n  ⚠ 系统级联合优化异常（{_e}），"
