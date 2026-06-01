@@ -384,7 +384,7 @@ class ActionGUI:
         # ── 固定底部操作区（不随左侧滚动区滚动）──────────────────
         fixed_bottom = ctk.CTkFrame(left_outer, fg_color='transparent')
         fixed_bottom.grid(row=1, column=0, sticky='ew', padx=4, pady=4)
-        fixed_bottom.columnconfigure((0, 1, 2, 3), weight=1)
+        fixed_bottom.columnconfigure((0, 1, 2, 3, 4), weight=1)
 
         self.btn_run = ctk.CTkButton(fixed_bottom, text="▶ 运行",
                                      command=self._run,
@@ -398,9 +398,13 @@ class ActionGUI:
                       command=self._save_config).grid(row=0, column=2, padx=2, sticky='ew')
         ctk.CTkButton(fixed_bottom, text="📂 加载",
                       command=self._load_config).grid(row=0, column=3, padx=2, sticky='ew')
+        self.btn_zemax = ctk.CTkButton(fixed_bottom, text="📐 导入 Zemax",
+                                       command=self._on_import_zemax,
+                                       state='disabled')
+        self.btn_zemax.grid(row=0, column=4, padx=2, sticky='ew')
 
         self.progress = ctk.CTkProgressBar(fixed_bottom, mode='indeterminate')
-        self.progress.grid(row=1, column=0, columnspan=4, sticky='ew', pady=(4, 0))
+        self.progress.grid(row=1, column=0, columnspan=5, sticky='ew', pady=(4, 0))
 
         # ── 状态栏（日志面板底部）────────────────────────────────
         status_bar = ctk.CTkFrame(right_frame, height=28, corner_radius=0)
@@ -500,7 +504,7 @@ class ActionGUI:
         self._var_gap_csv   = tk.StringVar()
         self._var_gap_cols  = tk.StringVar(
             value='d1 (G1-G2间距) (mm),d2 (G2-G3间距) (mm),d3 (G3-G4间距) (mm)')
-        self._var_stop_gi   = tk.StringVar(value='2')
+        self._var_stop_gi   = tk.StringVar(value='auto')
         self._var_stop_off  = tk.StringVar(value='0')
         self._var_fnum_w    = tk.StringVar(value='4.0')
         self._var_fnum_t    = tk.StringVar(value='5.6')
@@ -1209,12 +1213,37 @@ class ActionGUI:
     # ──────────────────────────────────────────────────────────────────
     #  运行控制
     # ──────────────────────────────────────────────────────────────────
+    def _on_import_zemax(self):
+        if self._running:
+            return
+        _cfg_json = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'last_run_config.json')
+        if not os.path.exists(_cfg_json):
+            messagebox.showwarning("无法导入", "未找到 last_run_config.json，请先运行自动流程。")
+            return
+        self._log("\n[导入 Zemax] 请确认 Zemax 已打开 Programming → Interactive Extension\n")
+        self._running = True
+        self.btn_run.configure(state='disabled')
+        self.btn_zemax.configure(state='disabled')
+        self._import_thread = threading.Thread(
+            target=self._zemax_import_entry,
+            args=(self._log_queue,),
+            daemon=True,
+        )
+        self._import_thread.start()
+        self.root.after(100, self._poll_import_queue)
+
     def _run(self):
         if self._running:
             return
 
         try:
             params = self._collect_all_params()
+        except (ValueError, TypeError) as e:
+            messagebox.showerror(
+                "参数错误",
+                f"有数值字段为空或填写了非数字，请检查焦距、口径、F/#、波长、"
+                f"权重等数值字段后重试。\n\n详情：{e}")
+            return
         except Exception as e:
             messagebox.showerror("参数解析错误", str(e))
             return
@@ -1299,6 +1328,10 @@ class ActionGUI:
         self.progress.stop()
         self.btn_run.configure(state='normal')
         self.btn_stop.configure(state='disabled')
+        # 自动流程跑完后，若 last_run_config.json 存在则启用"导入 Zemax"按钮
+        _cfg_json = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'last_run_config.json')
+        if os.path.exists(_cfg_json):
+            self.btn_zemax.configure(state='normal')
         if success:
             self._log(f"\n{'═'*60}\n✅ 运行完成\n{'═'*60}\n")
         else:
@@ -1346,6 +1379,49 @@ class ActionGUI:
                 pass
             sys.stdout = _orig_stdout
             sys.stderr = _orig_stderr
+
+    @staticmethod
+    def _zemax_import_entry(log_queue: queue.Queue):
+        _orig_stdout = sys.stdout
+        _orig_stderr = sys.stderr
+        _writer = _QueueWriter(log_queue)
+        sys.stdout = _writer
+        sys.stderr = _writer
+        try:
+            import test_bridge
+            test_bridge.run_test()
+            log_queue.put("\n[导入 Zemax] 执行完毕，请查看上方 PASS/FAIL 结果。\n")
+        except Exception:
+            import traceback
+            log_queue.put("\n[导入 Zemax] 失败：\n" + traceback.format_exc() + "\n")
+        finally:
+            sys.stdout = _orig_stdout
+            sys.stderr = _orig_stderr
+
+    def _poll_import_queue(self):
+        messages = []
+        try:
+            while True:
+                msg = self._log_queue.get_nowait()
+                messages.append(msg)
+        except queue.Empty:
+            pass
+
+        if messages:
+            self.log_text.insert(tk.END, ''.join(messages))
+            self._trim_log()
+            self.log_text.see(tk.END)
+
+        if self._import_thread and not self._import_thread.is_alive():
+            self._running = False
+            self.btn_run.configure(state='normal')
+            _cfg_json = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'last_run_config.json')
+            if os.path.exists(_cfg_json):
+                self.btn_zemax.configure(state='normal')
+            return
+
+        if self._running:
+            self.root.after(200, self._poll_import_queue)
 
 
 # ══════════════════════════════════════════════════════════════════════
