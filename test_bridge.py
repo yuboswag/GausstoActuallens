@@ -101,65 +101,77 @@ def _load_all_from_json(json_path):
     return prescription, corrected, delta_Hp_G4_achieved
 
 
-# 加载
-print("\n[从 last_run_config.json 加载面处方和修正间距]")
-DELTA_HP_G4 = 0.0  # 默认 0，JSON 加载成功后覆盖
-try:
-    SURFACE_PRESCRIPTION, ZOOM_CONFIGS, DELTA_HP_G4 = _load_all_from_json(_CONFIG_JSON)
-    print(f"  ✅ 加载成功：{len(SURFACE_PRESCRIPTION)} 个面，{len(ZOOM_CONFIGS)} 个配置")
-    print(f"  G4 后主面偏移 δH'_G4 = {DELTA_HP_G4:+.4f} mm（写 Zemax 时补偿）")
-except Exception as e:
-    print(f"  ❌ JSON 加载失败原因：{e}")
-    print(f"  ⚠ 回退到硬编码面数据 + CSV 原始间距（EPD 将按 F/# 线性插值）")
-    import traceback; traceback.print_exc()
-    # 回退到硬编码（保留原来的 SURFACE_PRESCRIPTION 作为后备）
-    SURFACE_PRESCRIPTION = [
-        ( 0, "G1-L1前",    60.768,  1.8077,  4.2700, "H-ZLaF50E"),
-        ( 1, "G1-L1后",  -790.914,  1.0000,  1.0000,  None),
-        ( 2, "G1-L2前",   -61.007,  1.8541,  3.1200, "H-ZF52"),
-        ( 3, "G1-L2/3胶", 779.212,  1.4388,  0.8800, "H-FK95N"),
-        ( 4, "G1-L3后",  -300.970,  1.0000,  1.0000,  None),
-        ( 5, "G1-L4前",    42.071,  1.6410,  5.5800, "H-ZK11"),
-        ( 6, "G1-L4后",  -591.250,  1.0000, 16.7030,  None),
-        ( 7, "G2-L1前",   -25.868,  1.8077,  1.5000, "H-ZLaF50E"),
-        ( 8, "G2-L1后",    24.953,  1.0000,  1.5000,  None),
-        ( 9, "G2-L2前",   -25.923,  1.7158,  1.5000, "H-LaK7A"),
-        (10, "G2-L2后",    26.759,  1.0000,  1.5000,  None),
-        (11, "G2-L3前",    27.269,  1.9570,  2.1300, "H-ZF88"),
-        (12, "G2-L3/4胶", -89.145,  1.4583,  0.8700, "H-FK61B"),
-        (13, "G2-L4后",   108.778,  1.0000, 51.4840,  None),
-        (14, "G3-L1前",    18.207,  1.6226,  2.9700, "H-ZK9B"),
-        (15, "G3-L1后",   -19.361,  1.0000,  1.0000,  None),
-        (16, "G3-L2前",   -20.971,  1.7610,  2.1200, "ZF6"),
-        (17, "G3-L2/3胶",-298.142,  1.4576,  0.8800, "H-FK71"),
-        (18, "G3-L3后",   -46.289,  1.0000, 28.8130,  None),
-        (19, "G4-L1前",   814.647,  1.4388,  1.5000, "H-FK95N"),
-        (20, "G4-L1/2胶",-522.478,  1.9570,  1.5000, "H-ZF88"),
-        (21, "G4-L2后", -2111.918,  1.0000,  4.0000,  None),
-        (22, "G4-L3前",    22.586,  1.6253,  1.6400, "H-ZK21"),
-        (23, "G4-L3后",  -162.500,  1.0000,  4.0000,  None),
-        (24, "G4-L4前",   -24.189,  1.6237,  1.5000, "H-F4"),
-        (25, "G4-L4后",   -77.618,  1.0000,  0.0000,  None),
-    ]
-    from zoom_utils import load_zoom_configs_for_zemax
-    CSV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '111.csv')
-    ZOOM_CONFIGS = load_zoom_configs_for_zemax(CSV_PATH, bfd_mm=8.0, fnum_wide=4.0, fnum_tele=5.6)
+def _prepare_config():
+    """加载 last_run_config.json 并返回 run_test() 所需的全部变量。（仅在被调用时触发副作用）"""
+    print("\n[从 last_run_config.json 加载面处方和修正间距]")
+    DELTA_HP_G4 = 0.0  # 默认 0，JSON 加载成功后覆盖
+    try:
+        SURFACE_PRESCRIPTION, ZOOM_CONFIGS, DELTA_HP_G4 = _load_all_from_json(_CONFIG_JSON)
+        print(f"  ✅ 加载成功：{len(SURFACE_PRESCRIPTION)} 个面，{len(ZOOM_CONFIGS)} 个配置")
+        print(f"  G4 后主面偏移 δH'_G4 = {DELTA_HP_G4:+.4f} mm（写 Zemax 时补偿）")
+    except Exception as e:
+        print(f"  ❌ JSON 加载失败原因：{e}")
+        print(f"  ⚠ 回退到硬编码面数据 + CSV 原始间距（EPD 将按 F/# 线性插值）")
+        import traceback; traceback.print_exc()
+        # 回退到硬编码（保留原来的 SURFACE_PRESCRIPTION 作为后备）
+        SURFACE_PRESCRIPTION = [
+            ( 0, "G1-L1前",    60.768,  1.8077,  4.2700, "H-ZLaF50E"),
+            ( 1, "G1-L1后",  -790.914,  1.0000,  1.0000,  None),
+            ( 2, "G1-L2前",   -61.007,  1.8541,  3.1200, "H-ZF52"),
+            ( 3, "G1-L2/3胶", 779.212,  1.4388,  0.8800, "H-FK95N"),
+            ( 4, "G1-L3后",  -300.970,  1.0000,  1.0000,  None),
+            ( 5, "G1-L4前",    42.071,  1.6410,  5.5800, "H-ZK11"),
+            ( 6, "G1-L4后",  -591.250,  1.0000, 16.7030,  None),
+            ( 7, "G2-L1前",   -25.868,  1.8077,  1.5000, "H-ZLaF50E"),
+            ( 8, "G2-L1后",    24.953,  1.0000,  1.5000,  None),
+            ( 9, "G2-L2前",   -25.923,  1.7158,  1.5000, "H-LaK7A"),
+            (10, "G2-L2后",    26.759,  1.0000,  1.5000,  None),
+            (11, "G2-L3前",    27.269,  1.9570,  2.1300, "H-ZF88"),
+            (12, "G2-L3/4胶", -89.145,  1.4583,  0.8700, "H-FK61B"),
+            (13, "G2-L4后",   108.778,  1.0000, 51.4840,  None),
+            (14, "G3-L1前",    18.207,  1.6226,  2.9700, "H-ZK9B"),
+            (15, "G3-L1后",   -19.361,  1.0000,  1.0000,  None),
+            (16, "G3-L2前",   -20.971,  1.7610,  2.1200, "ZF6"),
+            (17, "G3-L2/3胶",-298.142,  1.4576,  0.8800, "H-FK71"),
+            (18, "G3-L3后",   -46.289,  1.0000, 28.8130,  None),
+            (19, "G4-L1前",   814.647,  1.4388,  1.5000, "H-FK95N"),
+            (20, "G4-L1/2胶",-522.478,  1.9570,  1.5000, "H-ZF88"),
+            (21, "G4-L2后", -2111.918,  1.0000,  4.0000,  None),
+            (22, "G4-L3前",    22.586,  1.6253,  1.6400, "H-ZK21"),
+            (23, "G4-L3后",  -162.500,  1.0000,  4.0000,  None),
+            (24, "G4-L4前",   -24.189,  1.6237,  1.5000, "H-F4"),
+            (25, "G4-L4后",   -77.618,  1.0000,  0.0000,  None),
+        ]
+        from zoom_utils import load_zoom_configs_for_zemax
+        CSV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '111.csv')
+        ZOOM_CONFIGS = load_zoom_configs_for_zemax(CSV_PATH, bfd_mm=8.0, fnum_wide=4.0, fnum_tele=5.6)
 
-# 其他参数
-WAVELENGTH_UM = 0.587056        # 主波长（d 线）
-WAVELENGTHS_UM = [0.55, 0.45, 0.65]   # 主波长在第一个，可见光三波长
-SENSOR_HALF_DIAG_MM = 3.8       # 传感器半对角线
-STOP_SURFACE_IDX = 14           # 光阑面的 Action_a 编号
-# BFD 语义说明：
-#   BFD_PARAXIAL = Gaussianoptics paraxial BFD（G4 后主面 H'_G4 → 像面，可正可负）
-#   BFL_PHYSICAL = Zemax LDE 末段空气厚度（G4 后表面 V'_G4 → 像面）
-#   关系：BFL_PHYSICAL = BFD_PARAXIAL + δH'_G4_achieved
-BFD_PARAXIAL = 8.0              # 与 CSV BFD_TARGET 保持一致（暂硬编码，未来从 CSV 读）
-BFL_PHYSICAL = BFD_PARAXIAL + DELTA_HP_G4  # 实际写到 Zemax 最后一面的 thickness
+    # 其他参数
+    WAVELENGTH_UM = 0.587056        # 主波长（d 线）
+    WAVELENGTHS_UM = [0.55, 0.45, 0.65]   # 主波长在第一个，可见光三波长
+    SENSOR_HALF_DIAG_MM = 3.8       # 传感器半对角线
+    STOP_SURFACE_IDX = 14           # 光阑面的 Action_a 编号
+    # BFD 语义说明：
+    #   BFD_PARAXIAL = Gaussianoptics paraxial BFD（G4 后主面 H'_G4 → 像面，可正可负）
+    #   BFL_PHYSICAL = Zemax LDE 末段空气厚度（G4 后表面 V'_G4 → 像面）
+    #   关系：BFL_PHYSICAL = BFD_PARAXIAL + δH'_G4_achieved
+    BFD_PARAXIAL = 8.0              # 与 CSV BFD_TARGET 保持一致（暂硬编码，未来从 CSV 读）
+    BFL_PHYSICAL = BFD_PARAXIAL + DELTA_HP_G4  # 实际写到 Zemax 最后一面的 thickness
 
-# 保存路径
-SAVE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                         'test_zoom_lde.zmx')
+    # 保存路径
+    SAVE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             'test_zoom_lde.zmx')
+
+    return {
+        'SURFACE_PRESCRIPTION': SURFACE_PRESCRIPTION,
+        'ZOOM_CONFIGS': ZOOM_CONFIGS,
+        'WAVELENGTH_UM': WAVELENGTH_UM,
+        'WAVELENGTHS_UM': WAVELENGTHS_UM,
+        'SENSOR_HALF_DIAG_MM': SENSOR_HALF_DIAG_MM,
+        'STOP_SURFACE_IDX': STOP_SURFACE_IDX,
+        'BFL_PHYSICAL': BFL_PHYSICAL,
+        'SAVE_PATH': SAVE_PATH,
+    }
 
 # ---------------------------------------------------------------------------
 # 辅助：步骤输出格式
@@ -188,6 +200,15 @@ def fail_msg(msg: str = ''):
 # 主测试函数
 # ---------------------------------------------------------------------------
 def run_test():
+    cfg = _prepare_config()
+    SURFACE_PRESCRIPTION    = cfg['SURFACE_PRESCRIPTION']
+    ZOOM_CONFIGS            = cfg['ZOOM_CONFIGS']
+    WAVELENGTH_UM           = cfg['WAVELENGTH_UM']
+    WAVELENGTHS_UM          = cfg['WAVELENGTHS_UM']
+    SENSOR_HALF_DIAG_MM     = cfg['SENSOR_HALF_DIAG_MM']
+    STOP_SURFACE_IDX        = cfg['STOP_SURFACE_IDX']
+    BFL_PHYSICAL            = cfg['BFL_PHYSICAL']
+    SAVE_PATH               = cfg['SAVE_PATH']
     all_pass = True
     bridge = ZemaxBridge()
 
