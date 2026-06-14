@@ -564,7 +564,8 @@ def run_action_a_pipeline(params: dict):
                     # rank-0 的 k (已在上方算过 _struct_result)
                     _k0 = _struct_result.get('scale_factor_applied', 1.0)
                     _best_pick = (0, _struct_result, best, abs(_k0 - 1.0))
-                    _accepted = abs(_k0 - 1.0) <= _K_TOL
+                    _k0_conv = _struct_result.get('scale_converged', True)
+                    _accepted = _k0_conv and (abs(_k0 - 1.0) <= _K_TOL)
                     if not _accepted:
                         # rank-0 不达标, 扫描 rank-1.. 找第一个达标(列表已按光学评分排,
                         # 第一个达标者即阈值内光学最优); 同时记录全程 |k-1| 最小者兜底.
@@ -587,9 +588,17 @@ def run_action_a_pipeline(params: dict):
                             )
                             _k_try = _sr_try.get('scale_factor_applied', 1.0)
                             _dev_try = abs(_k_try - 1.0)
-                            if _dev_try < _best_pick[3]:
+                            _conv_try = _sr_try.get('scale_converged', True)
+                            # 兜底择优: 优先选 5c 收敛的候选; 在"收敛性相同"的前提下再比 |k-1|.
+                            # _best_pick[1] 是当前最优候选的 _struct_result, 取它的 converged 状态.
+                            _best_conv = _best_pick[1].get('scale_converged', True)
+                            _better = (
+                                (_conv_try and not _best_conv)          # 收敛的优于不收敛的
+                                or (_conv_try == _best_conv and _dev_try < _best_pick[3])  # 同类比 |k-1|
+                            )
+                            if _better:
                                 _best_pick = (_try_rank, _sr_try, _cand_a, _dev_try)
-                            if _dev_try <= _K_TOL:
+                            if _conv_try and _dev_try <= _K_TOL:
                                 _best_pick = (_try_rank, _sr_try, _cand_a, _dev_try)
                                 _accepted = True
                                 break
