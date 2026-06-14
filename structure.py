@@ -718,6 +718,7 @@ def compute_initial_structure(
     
     _ENABLE_5C_SCALING = ENABLE_5C_SCALING  # 读模块级常量
     _scale_factor_applied = 1.0   # 默认值, 让 5c 跳过分支下 return dict 仍可读
+    _scale_converged = True   # 5c 禁用时默认达标; 启用时在 5c 块末尾据实重判
     if not _ENABLE_5C_SCALING:
         print(f"\n【步骤5c】EFL 缩放修正  [跳过, _ENABLE_5C_SCALING=False]")
     else:
@@ -974,6 +975,15 @@ def compute_initial_structure(
         open("5c_debug.log", "a", encoding="utf-8").write(
             f"[5c] f_target={f_target_local:+.4f}  k_applied={_scale_factor_applied:.6f}  msg={_scale_msg!r}\n"
         )
+        # 据实判定 5c 是否达标: 成功缩放(k≠1) 或 良性 k=1(偏差<0.1%) 才算达标;
+        # 失败退回的 k=1 (偏差≥0.1%) 判为未达标. 仅供选片用, 不改任何结构.
+        _scale_converged = (
+            abs(_scale_factor_applied - 1.0) > 1e-9
+            or (np.isfinite(_efl_at_1) and np.isfinite(f_target_local)
+                and abs(_efl_at_1 - f_target_local) / abs(f_target_local) < 1e-3)
+        )
+        print(f"  [5c达标判定] scale_converged={_scale_converged} "
+              f"(k={_scale_factor_applied:.4f})")
 
     # ── 整理折射面序列 ────────────────────────────────────────
     surfaces    = []   # (面描述, R值, 所属片索引, 是否是胶合面)
@@ -1207,6 +1217,7 @@ def compute_initial_structure(
     return dict(p=p, q=q, surfaces=surfaces, thickness=thickness,
                 cem_results=cem_results, clamp_notes=clamp_notes,
                 delta_H=delta_H, delta_Hp=delta_Hp,
-                scale_factor_applied=_scale_factor_applied)
+                scale_factor_applied=_scale_factor_applied,
+                scale_converged=_scale_converged)
 
 
