@@ -281,6 +281,152 @@ def compute_cemented_thickness(R1, R_cem, R3, D, phi2, phi3,
     return round(t2, 2), round(t3, 2), note
 
 
+def _bend_to_window(face_data, f_target, dH_max=None, dHp_min=None,
+                    dH_min=None, dHp_max=None):
+    """
+    弯曲+缩放联合求解：c_i → s·(c_i + δ)，同时命中目标 EFL 和主面窗口约束。
+
+    弯曲 δ 改变形状因子（移动主面位置），缩放 s 配平光焦度（使 EFL = f_target）。
+    在 δ 扫描范围内搜索满足窗口约束且 EFL 偏差 < 1% 的 (s, δ) 组合，
+    返回 |δ| 最小的解（最小弯曲，最少牺牲赛德尔像差）。
+
+    参数
+    ----
+    face_data : list of (c, n_after, t_after, lens_idx, kind, cem_pair)
+        步骤 5c.1 构建的面数据列表。
+    f_target : float
+        目标等效焦距 (mm)。
+    dH_max : float 或 None
+        delta_H 上限 (mm)，None 表示无约束。
+    dHp_min : float 或 None
+        delta_Hp 下限 (mm)，None 表示无约束。
+    dH_min : float 或 None
+        delta_H 下限 (mm)，None 表示无约束。
+    dHp_max : float 或 None
+        delta_Hp 上限 (mm)，None 表示无约束。
+
+    返回
+    ----
+    (s, delta, dH, dHp) : (float, float, float, float)
+        s = 缩放因子, delta = 弯曲偏移量 (mm⁻¹),
+        dH, dHp = 弯曲后的主面位置 (mm)。
+
+    异常
+    ----
+    ValueError
+        若在所有 δ 扫描点均无满足窗口约束的解。
+    """
+    c0 = np.array([fd[0] for fd in face_data])
+    t_vals = np.array([fd[2] for fd in face_data])
+    n_vals = np.array([fd[1] for fd in face_data])
+    n_surfs = len(c0)
+
+    def _efl_pp(s, delta):
+        """返回弯曲后系统的 (EFL, dH, dHp)。"""
+        M = np.eye(2)
+        n_prev = 1.0
+        for i in range(n_surfs):
+            c_i = s * (c0[i] + delta)
+            phi_i = (n_vals[i] - n_prev) * c_i
+            M = np.array([[1.0, 0.0], [-phi_i, 1.0]]) @ M
+            if i < n_surfs - 1:
+                M = np.array([[1.0, t_vals[i] / n_vals[i]],
+                              [0.0, 1.0]]) @ M
+            n_prev = n_vals[i]
+        A, B, C, D = M[0, 0], M[0, 1], M[1, 0], M[1, 1]
+        if abs(C) < 1e-12:
+            return float('inf'), 0.0, 0.0
+        return -1.0 / C, (D - 1.0) / C, (1.0 - A) / C
+
+    # ── 确定 δ 扫描范围 ──────────────────────────────────
+    cmag = max((abs(c) for c in c0 if abs(c) > 1e-14), default=0.02)
+    deltas = np.linspace(-2.0 * cmag, 2.0 * cmag, 41)
+    # 始终包含 δ=0（优先不弯曲的解）
+    deltas = sorted(set(np.round(deltas, 12)) | {0.0})
+
+    # s 扫描范围与 5c.4 扫描表一致
+    s_vals = np.linspace(0.2, 5.0, 500)
+
+    feasible = []
+    for delta in deltas:
+        best = None
+        for s in s_vals:
+            efl, dH, dHp = _efl_pp(s, delta)
+            if not np.isfinite(efl):
+                continue
+            err = abs(efl - f_target)
+            if best is None or err < best[0]:
+                best = (err, s, efl, dH, dHp)
+        if best is None:
+            continue
+        err, s, efl, dH, dHp = best
+        # EFL 偏差 < 1% 才算有效解
+        if abs(efl - f_target) / abs(f_target) > 0.01:
+            continue
+        # 检查窗口约束
+        if dH_max is not None and dH > dH_max + 1e-9:
+            continue
+        if dH_min is not None and dH < dH_min - 1e-9:
+            continue
+        if dHp_max is not None and dHp > dHp_max + 1e-9:
+            continue
+        if dHp_min is not None and dHp < dHp_min - 1e-9:
+            continue
+        feasible.append((delta, s, dH, dHp, err))
+
+    if feasible:
+        # 选 |δ| 最小的解（最少牺牲赛德尔像差）
+        best = min(feasible, key=lambda x: abs(x[0]))
+        delta, s, dH, dHp, _ = best
+        return float(s), float(delta), float(dH), float(dHp)
+
+    # ── 无可行解：报告最近解的窗口违反量 ──────────────────
+    best_any = None
+    for delta in deltas:
+        best_s = None
+        for s in s_vals:
+            efl, dH, dHp = _efl_pp(s, delta)
+            if not np.isfinite(efl):
+                continue
+            err = abs(efl - f_target)
+            if best_s is None or err < best_s[0]:
+                best_s = (err, s, efl, dH, dHp)
+        if best_s is None:
+            continue
+        err, s, efl, dH, dHp = best_s
+        if abs(efl - f_target) / abs(f_target) > 0.01:
+            continue
+        violation = 0.0
+        if dH_max is not None and dH > dH_max:
+            violation += dH - dH_max
+        if dH_min is not None and dH < dH_min:
+            violation += dH_min - dH
+        if dHp_max is not None and dHp > dHp_max:
+            violation += dHp - dHp_max
+        if dHp_min is not None and dHp < dHp_min:
+            violation += dHp_min - dHp
+        if best_any is None or violation < best_any[0]:
+            best_any = (violation, delta, s, dH, dHp)
+
+    if best_any is not None:
+        _, delta, s, dH, dHp = best_any
+        bounds_str = []
+        if dH_max is not None:
+            bounds_str.append(f"dH≤{dH_max:.1f}")
+        if dH_min is not None:
+            bounds_str.append(f"dH≥{dH_min:.1f}")
+        if dHp_max is not None:
+            bounds_str.append(f"dHp≤{dHp_max:.1f}")
+        if dHp_min is not None:
+            bounds_str.append(f"dHp≥{dHp_min:.1f}")
+        raise ValueError(
+            f"窗口无解: dH={dH:+.2f} dHp={dHp:+.2f} "
+            f"(约束: {', '.join(bounds_str)})")
+    raise ValueError(
+        f"窗口无解: 在δ∈[{-2*cmag:.4f}, {2*cmag:.4f}]内"
+        f"无弯曲达到EFL={f_target:.3f}")
+
+
 def compute_initial_structure(
         glass_names,
         nd_values,
