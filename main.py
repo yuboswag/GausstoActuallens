@@ -471,6 +471,27 @@ def run_action_a_pipeline(params: dict):
 
         # ── 串行搜索各组元（action_a 内部 ProcessPoolExecutor 自己利用多核）──
         print(f"\n  串行搜索 {N_GROUPS} 个组元（每组内部用 {N_WORKERS} 进程并行）...")
+
+        # ── 主面窗口（路线①）：从系统间距 CSV 反推每组主面允许范围 ──
+        _MIN_GAP_W = 0.5
+        PP_WINDOWS = [None] * N_GROUPS
+        try:
+            _sys_pos_w = load_zoom_positions_from_csv(
+                str(S_SYSTEM_GAP_CSV), S_SYSTEM_GAP_COLUMNS)
+            _gap_cols = list(zip(*[p['gap_values_mm'] for p in _sys_pos_w]))
+            _dmin = [min(_g) for _g in _gap_cols]
+            for _gi_w in range(N_GROUPS):
+                _w = {}
+                if _gi_w >= 1:
+                    _w['dH_max'] = _dmin[_gi_w - 1] - _MIN_GAP_W
+                if _gi_w <= N_GROUPS - 2:
+                    _w['dHp_min'] = _MIN_GAP_W - _dmin[_gi_w]
+                PP_WINDOWS[_gi_w] = _w if _w else None
+            print(f"  [主面窗口] 最紧间距 {[round(d,2) for d in _dmin]} → {PP_WINDOWS}")
+        except Exception as _ew:
+            print(f"  ⚠ 主面窗口计算失败（{_ew}），退回无窗口（原行为）。")
+            PP_WINDOWS = [None] * N_GROUPS
+
         _worker_results = []
         for gi, gp in enumerate(ALL_GROUPS):
             _cem_pairs  = ALL_CEMENTED_PAIRS[gi]
@@ -613,6 +634,29 @@ def run_action_a_pipeline(params: dict):
                     else:
                         print(f"  [Top-N重排] {gp['name']} 无候选达标, 选 |k-1| 最小 rank-{_pick_rank+1}: k={_pick_k:.4f} (|k-1|={_pick_dev:.3f})")
                 # ═════════ Top-N 重排结束 ═══════════════════════════════════
+
+                # ── 主面窗口重弯（路线①）：对选定候选再算一次，带窗口 ──
+                _win_gi = PP_WINDOWS[gi] if gi < len(PP_WINDOWS) else None
+                if _win_gi is not None and _STRUCT_ENABLE_5C:
+                    _struct_result = compute_initial_structure(
+                        glass_names      = _auto_glass_names,
+                        nd_values        = _auto_nd_values,
+                        focal_lengths_mm = _auto_focal_lengths,
+                        cemented_pairs   = _cem_pairs,
+                        spacings_mm      = _spacings,
+                        D_mm             = _d_mm,
+                        min_R_mm         = _min_r_mm,
+                        t_edge_min       = _t_edge,
+                        t_center_min     = _t_center,
+                        t_cemented_min   = _t_cemented,
+                        h1               = _d_mm / 2.0,
+                        u0               = 0.0,
+                        pbar_overrides   = _pbar_overrides,
+                        pp_window        = _win_gi,
+                    )
+                    print(f"  [主面窗口] {gp['name']} 重弯: "
+                          f"dH={_struct_result['delta_H']:+.2f} "
+                          f"dHp={_struct_result['delta_Hp']:+.2f}")
 
                 _group_cands = select_diverse_candidates(
                     search_results  = results,
