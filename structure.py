@@ -446,7 +446,8 @@ def compute_initial_structure(
         ubar0: float = 0.1,
         w_SI: float = 1.0,
         w_SII: float = 2.0,
-        w_SIV: float = 0.5):
+        w_SIV: float = 0.5,
+        pp_window: dict = None):
     """
     计算薄透镜系统的初始结构（p、q、R、厚度）。
 
@@ -1075,13 +1076,32 @@ def compute_initial_structure(
                                    f'残差 {_residual_frac * 100:.2f}% > '
                                    f'{_FALLBACK_TOL * 100:.0f}%, 保持 k=1')
 
-        # 5c.5: 应用缩放, 写回 cem_results / _final_radii, 突破检查写 clamp_notes
-        if abs(_scale_factor_applied - 1.0) > 1e-9:
+        # 5c.4c: 若给定主面窗口，用窗口化弯曲 (s,δ) 覆盖单一 k（路线①）
+        _delta_applied = 0.0
+        if pp_window is not None:
+            try:
+                _s_w, _d_w, _dHw, _dHpw = _bend_to_window(
+                    _curr_face_data, f_target_local,
+                    dH_max=pp_window.get('dH_max'),
+                    dHp_min=pp_window.get('dHp_min'),
+                    dH_min=pp_window.get('dH_min'),
+                    dHp_max=pp_window.get('dHp_max'))
+            except ValueError as _we:
+                raise ValueError(
+                    f"[{','.join(glass_names)}] 5c 主面窗口求解失败: {_we}")
+            _scale_factor_applied = _s_w
+            _delta_applied = _d_w
+            _scale_msg += (f'\n  [主面窗口] 弯曲 s={_s_w:.6f} δ={_d_w:+.6f} → '
+                           f'dH={_dHw:+.3f} dHp={_dHpw:+.3f}（窗口内）')
+        _s_applied = _scale_factor_applied
+
+        # 5c.5: 应用缩放/弯曲, 写回 cem_results / _final_radii, 突破检查写 clamp_notes
+        if abs(_s_applied - 1.0) > 1e-9 or abs(_delta_applied) > 1e-9:
             _k = _scale_factor_applied
             _scale_breach_notes = {}
             for _key_s, _cr_s in cem_results.items():
                 for _r_field in ('c1', 'c_cem', 'c3'):
-                    _cr_s[_r_field] = _cr_s[_r_field] * _k
+                    _cr_s[_r_field] = _s_applied * (_cr_s[_r_field] + _delta_applied)
                 _cr_s['R1']    = (1.0 / _cr_s['c1']
                                   if abs(_cr_s['c1']) > 1e-12 else float('inf'))
                 _cr_s['R_cem'] = (1.0 / _cr_s['c_cem']
@@ -1101,8 +1121,8 @@ def compute_initial_structure(
             for _li_s, (_R1_old, _R2_old) in list(_final_radii.items()):
                 _c1_old = 1.0 / _R1_old if abs(_R1_old) > 1e-12 else 0.0
                 _c2_old = 1.0 / _R2_old if abs(_R2_old) > 1e-12 else 0.0
-                _c1_new = _c1_old * _k
-                _c2_new = _c2_old * _k
+                _c1_new = _s_applied * (_c1_old + _delta_applied)
+                _c2_new = _s_applied * (_c2_old + _delta_applied)
                 _R1_new = 1.0 / _c1_new if abs(_c1_new) > 1e-12 else float('inf')
                 _R2_new = 1.0 / _c2_new if abs(_c2_new) > 1e-12 else float('inf')
                 _final_radii[_li_s] = (_R1_new, _R2_new)
