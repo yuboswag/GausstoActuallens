@@ -241,6 +241,9 @@ def parse_csv_metadata(csv_path, encoding='utf-8-sig'):
                                 metadata['bfl_ideal'] = float(value)
                         elif key in ('f_number_wide', 'f_number_tele', 'sensor_size'):
                             metadata[key] = float(value)
+                        elif key in ('f_g1', 'f_g2', 'f_g3', 'f_g4',
+                                     'd_g1', 'd_g2', 'd_g3', 'd_g4'):
+                            metadata[key] = float(value)
                     except ValueError:
                         pass  # 解析失败则跳过
     except (FileNotFoundError, OSError):
