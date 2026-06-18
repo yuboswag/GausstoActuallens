@@ -172,6 +172,29 @@ def run_action_a_pipeline(params: dict):
     S_ZOOM_CSV  = Path(_s_zoom_csv) if _s_zoom_csv else None
 
     groups_cfg = params.get('groups', [])
+
+    # ── CSV 焦距/口径覆盖：让 CSV 成为各组 f_group/D 的唯一真相源 ──
+    # 上游 Gaussianoptics 解出的焦距(F_Gx)/口径(D_Gx)写在 CSV 表头，
+    # 此处按组序(G1..G4)覆盖硬编码默认，杜绝"间距按A套焦距、镜片按B套焦距"的脱钩。
+    try:
+        _gap_csv_ov = params.get('system', {}).get('gap_csv') or None
+        _csv_ov = Path(_gap_csv_ov) if _gap_csv_ov else None
+        if _csv_ov is not None:
+            _meta_ov = parse_csv_metadata(_csv_ov)
+            for _gi_ov, _g_ov in enumerate(groups_cfg):
+                _fk = f'f_g{_gi_ov + 1}'
+                _dk = f'd_g{_gi_ov + 1}'
+                if _fk in _meta_ov:
+                    _old = _g_ov.get('f_group')
+                    _g_ov['f_group'] = _meta_ov[_fk]
+                    print(f"  [CSV覆盖] {_g_ov.get('name','G?')} f_group: {_old} → {_meta_ov[_fk]}")
+                if _dk in _meta_ov:
+                    _old = _g_ov.get('D')
+                    _g_ov['D'] = _meta_ov[_dk]
+                    print(f"  [CSV覆盖] {_g_ov.get('name','G?')} D: {_old} → {_meta_ov[_dk]}")
+    except Exception as _e_ov:
+        print(f"  ⚠ CSV 焦距/口径覆盖失败（{_e_ov}），沿用配置默认。")
+
     N_GROUPS   = len(groups_cfg)
 
     # ── 将 groups 列表还原为 ALL_GROUPS 风格的 dict 列表 ────────────
@@ -234,6 +257,7 @@ def run_action_a_pipeline(params: dict):
     _gap_csv = sys_cfg.get('gap_csv') or None
     S_SYSTEM_GAP_CSV        = Path(_gap_csv) if _gap_csv else None
     S_SYSTEM_GAP_COLUMNS    = sys_cfg.get('gap_columns', [])
+    S_SYSTEM_PP_GAP_COLUMNS = sys_cfg.get('pp_gap_columns', [])
     _raw_sgi = sys_cfg.get('stop_group_idx')
     if _raw_sgi is None or str(_raw_sgi).lower() in ('auto', 'none', ''):
         S_SYSTEM_STOP_GROUP_IDX = None   # 稍后从 CSV 元数据解析
@@ -638,25 +662,32 @@ def run_action_a_pipeline(params: dict):
                 # ── 主面窗口重弯（路线①）：对选定候选再算一次，带窗口 ──
                 _win_gi = PP_WINDOWS[gi] if gi < len(PP_WINDOWS) else None
                 if _win_gi is not None and _STRUCT_ENABLE_5C:
-                    _struct_result = compute_initial_structure(
-                        glass_names      = _auto_glass_names,
-                        nd_values        = _auto_nd_values,
-                        focal_lengths_mm = _auto_focal_lengths,
-                        cemented_pairs   = _cem_pairs,
-                        spacings_mm      = _spacings,
-                        D_mm             = _d_mm,
-                        min_R_mm         = _min_r_mm,
-                        t_edge_min       = _t_edge,
-                        t_center_min     = _t_center,
-                        t_cemented_min   = _t_cemented,
-                        h1               = _d_mm / 2.0,
-                        u0               = 0.0,
-                        pbar_overrides   = _pbar_overrides,
-                        pp_window        = _win_gi,
-                    )
-                    print(f"  [主面窗口] {gp['name']} 重弯: "
-                          f"dH={_struct_result['delta_H']:+.2f} "
-                          f"dHp={_struct_result['delta_Hp']:+.2f}")
+                    # 重弯是二次优化：失败时降级保留重弯前已选定的候选（_struct_result），
+                    # 不让单组重弯失败崩溃整个 worker（强负组如 G2 主面窗口可能无解）。
+                    try:
+                        _rebent = compute_initial_structure(
+                            glass_names      = _auto_glass_names,
+                            nd_values        = _auto_nd_values,
+                            focal_lengths_mm = _auto_focal_lengths,
+                            cemented_pairs   = _cem_pairs,
+                            spacings_mm      = _spacings,
+                            D_mm             = _d_mm,
+                            min_R_mm         = _min_r_mm,
+                            t_edge_min       = _t_edge,
+                            t_center_min     = _t_center,
+                            t_cemented_min   = _t_cemented,
+                            h1               = _d_mm / 2.0,
+                            u0               = 0.0,
+                            pbar_overrides   = _pbar_overrides,
+                            pp_window        = _win_gi,
+                        )
+                        _struct_result = _rebent
+                        print(f"  [主面窗口] {gp['name']} 重弯: "
+                              f"dH={_struct_result['delta_H']:+.2f} "
+                              f"dHp={_struct_result['delta_Hp']:+.2f}")
+                    except Exception as _rebend_e:
+                        print(f"  ⚠ [主面窗口] {gp['name']} 重弯失败，降级保留重弯前候选："
+                              f"{_rebend_e}", flush=True)
 
                 _group_cands = select_diverse_candidates(
                     search_results  = results,
@@ -1102,7 +1133,7 @@ def run_action_a_pipeline(params: dict):
                 all_spacings_mm    = ALL_SPACINGS_MM,
                 all_vgen_list      = auto_all_vgen_lists,
                 system_gap_csv     = S_SYSTEM_GAP_CSV,
-                system_gap_columns = S_SYSTEM_GAP_COLUMNS,
+                system_gap_columns = S_SYSTEM_PP_GAP_COLUMNS,
                 stop_group_idx     = S_SYSTEM_STOP_GROUP_IDX,
                 stop_offset        = S_SYSTEM_STOP_OFFSET,
                 sensor_diag_mm     = S_SYSTEM_SENSOR_DIAG_MM,
@@ -1228,7 +1259,7 @@ def run_action_a_pipeline(params: dict):
             all_spacings_mm    = ALL_SPACINGS_MM,
             all_vgen_list      = ALL_VGEN_LIST,
             system_gap_csv     = S_SYSTEM_GAP_CSV,
-            system_gap_columns = S_SYSTEM_GAP_COLUMNS,
+            system_gap_columns = S_SYSTEM_PP_GAP_COLUMNS,
             stop_group_idx     = S_SYSTEM_STOP_GROUP_IDX,
             stop_offset        = S_SYSTEM_STOP_OFFSET,
             sensor_diag_mm     = S_SYSTEM_SENSOR_DIAG_MM,
@@ -1311,12 +1342,15 @@ if __name__ == "__main__":
             "zoom_csv_group":  "G2",       # 变焦组，填 CSV 列名前缀
             "f_group":         -12.151,
             "D":               15,
-            "structure":       ['neg', 'neg', 'pos', 'neg'],
+            "structure":       ['neg', 'pos'],        # S1: 2片胶合
             "apo":             False,
-            "cemented":        [(2, 3)],   
-            "min_f_mm":        15,
+            "cemented":        [(0, 1)],              # 2片下唯一胶合对
+            "min_f_mm":        6,                     # 放宽以允许强负片 (~-9mm)
             "max_f_mm":        None,
             "allow_duplicate": True,
+            "min_r_mm":        8.0,                   # 放宽到 8mm (R/D≈0.52)
+            "spacings_mm":     [0.0],                 # 2片胶合, 1个间距=0
+            "glass_names":     [],                    # 空=让AUTO搜索
         },
         {
             "name":            "G3",
@@ -1543,6 +1577,14 @@ if __name__ == "__main__":
         'd3 (G3-G4间距) (mm)',
     ]
 
+    # 近轴 EFL/赛德尔验证专用：主面间距列（逐面 ABCD 串联需主面对齐）。
+    # 与顶点列 S_SYSTEM_GAP_COLUMNS 分开：后者服务主面窗口反推 + Zemax LDE 写入。
+    S_SYSTEM_PP_GAP_COLUMNS = [
+        'd1_主面间距 (Paraxial验证) (mm)',
+        'd2_主面间距 (Paraxial验证) (mm)',
+        'd3_主面间距 (Paraxial验证) (mm)',
+    ]
+
     # 🔧 系统参数3：光阑面位置——按组元索引指定（与玻璃名称无关，不受胶合形式影响）
     #   S_SYSTEM_STOP_GROUP_IDX : 光阑所在组元的 0-based 索引（0=G1, 1=G2, 2=G3, 3=G4）
     #   S_SYSTEM_STOP_OFFSET    : 在该组面序列中的偏移（0=该组第一面，-1=该组最后一面）
@@ -1644,6 +1686,7 @@ if __name__ == "__main__":
         'system': {
             'gap_csv':        str(S_SYSTEM_GAP_CSV) if S_SYSTEM_GAP_CSV is not None else None,
             'gap_columns':    S_SYSTEM_GAP_COLUMNS,
+            'pp_gap_columns': S_SYSTEM_PP_GAP_COLUMNS,
             'stop_group_idx': S_SYSTEM_STOP_GROUP_IDX,
             'stop_offset':    S_SYSTEM_STOP_OFFSET,
             'fnum_wide':      S_SYSTEM_FNUM_WIDE,
