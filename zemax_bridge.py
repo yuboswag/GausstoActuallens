@@ -477,134 +477,143 @@ class ZemaxBridge:
 
         tmp_dir = tempfile.gettempdir()
 
-        for cfg in range(1, n_configs + 1):
-            # ── 1. 切换配置并轮询确认 ─────────────────────────
-            mce.SetCurrentConfiguration(cfg)
-            for _wait in range(20):
-                if mce.CurrentConfiguration == cfg:
-                    break
-                time.sleep(0.05)
-            else:
-                raise RuntimeError(
-                    f'Config {cfg} 切换 1 秒未生效'
-                )
-            # 即使轮询返回正确值，再多等一拍让 LDE 内部数据稳定
-            time.sleep(0.1)
-
-            # ── 2. 创建分析 ───────────────────────────────────
-            analysis = self._system.Analyses.New_Analysis(analysis_id)
-            content = None
-            try:
-                analysis.ApplyAndWaitForCompletion()
-
-                # ── 3. 重试循环：每次用新文件名 + 新 GetResults ──
-                for attempt in range(5):
-                    tmp_path = os.path.join(
-                        tmp_dir,
-                        f'cardinal_cfg{cfg}_{uuid.uuid4().hex}.txt'
+        # ── Cardinal Points 是近轴量，Ray Aiming 会让分析走光线瞄准迭代，
+        #    对未优化的生种子可能不收敛导致 GetTextFile 写不出文件。
+        #    读 EFL 期间临时关闭，方法结束恢复原值。──
+        _ray = self._system.SystemData.RayAiming
+        _ray_old = _ray.RayAiming
+        _ray.RayAiming = self._ZOSAPI.SystemData.RayAimingMethod.Off
+        try:
+            for cfg in range(1, n_configs + 1):
+                # ── 1. 切换配置并轮询确认 ─────────────────────────
+                mce.SetCurrentConfiguration(cfg)
+                for _wait in range(20):
+                    if mce.CurrentConfiguration == cfg:
+                        break
+                    time.sleep(0.05)
+                else:
+                    raise RuntimeError(
+                        f'Config {cfg} 切换 1 秒未生效'
                     )
+                # 即使轮询返回正确值，再多等一拍让 LDE 内部数据稳定
+                time.sleep(0.1)
 
-                    try:
-                        results = analysis.GetResults()  # 每次都新取
-                        results.GetTextFile(tmp_path)
-                    except Exception as e:
-                        print(f'    [重试 {attempt+1}] GetTextFile 异常: {e}')
+                # ── 2. 创建分析 ───────────────────────────────────
+                analysis = self._system.Analyses.New_Analysis(analysis_id)
+                content = None
+                try:
+                    analysis.ApplyAndWaitForCompletion()
 
-                    file_ok = (os.path.exists(tmp_path)
-                               and os.path.getsize(tmp_path) > 100)
-                    if file_ok:
+                    # ── 3. 重试循环：每次用新文件名 + 新 GetResults ──
+                    for attempt in range(5):
+                        tmp_path = os.path.join(
+                            tmp_dir,
+                            f'cardinal_cfg{cfg}_{uuid.uuid4().hex}.txt'
+                        )
+
                         try:
-                            with open(tmp_path, 'r', encoding='utf-16-le',
-                                      errors='replace') as f:
-                                content = f.read()
-                            if '焦长' in content or 'Effective' in content:
-                                # 成功，清理本次文件并跳出
+                            results = analysis.GetResults()  # 每次都新取
+                            results.GetTextFile(tmp_path)
+                        except Exception as e:
+                            print(f'    [重试 {attempt+1}] GetTextFile 异常: {e}')
+
+                        file_ok = (os.path.exists(tmp_path)
+                                   and os.path.getsize(tmp_path) > 100)
+                        if file_ok:
+                            try:
+                                with open(tmp_path, 'r', encoding='utf-16-le',
+                                          errors='replace') as f:
+                                    content = f.read()
+                                if '焦长' in content or 'Effective' in content:
+                                    # 成功，清理本次文件并跳出
+                                    try:
+                                        os.unlink(tmp_path)
+                                    except Exception:
+                                        pass
+                                    break
+                                else:
+                                    content = None  # 内容无效，下一次重试
+                            except Exception as e:
+                                print(f'    [重试 {attempt+1}] 读取异常: {e}')
+                                content = None
+
+                        # 清理本次文件，避免堆积
+                        try:
+                            os.unlink(tmp_path)
+                        except Exception:
+                            pass
+
+                        # 指数退避（最后一次不用等）
+                        if attempt < 4:
+                            time.sleep(0.1 * (2 ** attempt))
+
+                    if content is None:
+                        # 失败时尝试再读一次最后的临时文件，把内容前 600 字符写入异常
+                        diag = '(无法获取诊断信息)'
+                        try:
+                            last_path = os.path.join(
+                                tmp_dir,
+                                f'cardinal_diag_cfg{cfg}_{uuid.uuid4().hex}.txt'
+                            )
+                            results = analysis.GetResults()
+                            results.GetTextFile(last_path)
+                            if os.path.exists(last_path):
+                                size = os.path.getsize(last_path)
+                                if size > 0:
+                                    with open(last_path, 'r',
+                                              encoding='utf-16-le',
+                                              errors='replace') as f:
+                                        diag_text = f.read()
+                                    diag = (f'文件 size={size} 字节，'
+                                            f'前 600 字符: {diag_text[:600]!r}')
+                                else:
+                                    diag = f'文件 size=0 字节（GetTextFile 静默失败）'
                                 try:
-                                    os.unlink(tmp_path)
+                                    os.unlink(last_path)
                                 except Exception:
                                     pass
-                                break
                             else:
-                                content = None  # 内容无效，下一次重试
-                        except Exception as e:
-                            print(f'    [重试 {attempt+1}] 读取异常: {e}')
-                            content = None
+                                diag = '文件未生成（GetTextFile 完全失败）'
+                        except Exception as _e:
+                            diag = f'诊断时异常: {_e}'
 
-                    # 清理本次文件，避免堆积
+                        raise RuntimeError(
+                            f'Config {cfg} Cardinal Points 5 次重试后仍失败 | {diag}'
+                        )
+                finally:
                     try:
-                        os.unlink(tmp_path)
+                        analysis.Close()
                     except Exception:
                         pass
+                    # 让 Zemax 完成 analysis 关闭，下一次 New_Analysis 才不会干扰
+                    time.sleep(0.05)
 
-                    # 指数退避（最后一次不用等）
-                    if attempt < 4:
-                        time.sleep(0.1 * (2 ** attempt))
+                # ── 4. 解析含"焦长"的行 ─────────────────────────
+                efl = None
+                for line in content.splitlines():
+                    if '焦长' in line or 'Effective Focal Length' in line:
+                        parts = line.split(':')
+                        if len(parts) >= 2:
+                            nums = parts[1].split()
+                            if nums:
+                                try:
+                                    efl = abs(float(nums[-1]))
+                                    break
+                                except ValueError:
+                                    continue
 
-                if content is None:
-                    # 失败时尝试再读一次最后的临时文件，把内容前 600 字符写入异常
-                    diag = '(无法获取诊断信息)'
-                    try:
-                        last_path = os.path.join(
-                            tmp_dir,
-                            f'cardinal_diag_cfg{cfg}_{uuid.uuid4().hex}.txt'
-                        )
-                        results = analysis.GetResults()
-                        results.GetTextFile(last_path)
-                        if os.path.exists(last_path):
-                            size = os.path.getsize(last_path)
-                            if size > 0:
-                                with open(last_path, 'r',
-                                          encoding='utf-16-le',
-                                          errors='replace') as f:
-                                    diag_text = f.read()
-                                diag = (f'文件 size={size} 字节，'
-                                        f'前 600 字符: {diag_text[:600]!r}')
-                            else:
-                                diag = f'文件 size=0 字节（GetTextFile 静默失败）'
-                            try:
-                                os.unlink(last_path)
-                            except Exception:
-                                pass
-                        else:
-                            diag = '文件未生成（GetTextFile 完全失败）'
-                    except Exception as _e:
-                        diag = f'诊断时异常: {_e}'
-
+                if efl is None or efl < 0.1:
                     raise RuntimeError(
-                        f'Config {cfg} Cardinal Points 5 次重试后仍失败 | {diag}'
+                        f'无法从 Config {cfg} Cardinal 报告解析 EFL，'
+                        f'报告前 400 字符：{content[:400]}'
                     )
-            finally:
-                try:
-                    analysis.Close()
-                except Exception:
-                    pass
-                # 让 Zemax 完成 analysis 关闭，下一次 New_Analysis 才不会干扰
-                time.sleep(0.05)
 
-            # ── 4. 解析含"焦长"的行 ─────────────────────────
-            efl = None
-            for line in content.splitlines():
-                if '焦长' in line or 'Effective Focal Length' in line:
-                    parts = line.split(':')
-                    if len(parts) >= 2:
-                        nums = parts[1].split()
-                        if nums:
-                            try:
-                                efl = abs(float(nums[-1]))
-                                break
-                            except ValueError:
-                                continue
+                efls.append(round(efl, 4))
+                print(f'    [cardinal] Config {cfg}: EFL={efl:.4f} mm')
 
-            if efl is None or efl < 0.1:
-                raise RuntimeError(
-                    f'无法从 Config {cfg} Cardinal 报告解析 EFL，'
-                    f'报告前 400 字符：{content[:400]}'
-                )
-
-            efls.append(round(efl, 4))
-            print(f'    [cardinal] Config {cfg}: EFL={efl:.4f} mm')
-
-        return efls
+            return efls
+        finally:
+            _ray.RayAiming = _ray_old
 
     def _read_effl_via_mfe(self) -> list:
         """
