@@ -155,8 +155,8 @@ def _prepare_config():
     #   BFD_PARAXIAL = Gaussianoptics paraxial BFD（G4 后主面 H'_G4 → 像面，可正可负）
     #   BFL_PHYSICAL = Zemax LDE 末段空气厚度（G4 后表面 V'_G4 → 像面）
     #   关系：BFL_PHYSICAL = BFD_PARAXIAL + δH'_G4_achieved
-    BFD_PARAXIAL = 8.0              # 与 CSV BFD_TARGET 保持一致（暂硬编码，未来从 CSV 读）
-    BFL_PHYSICAL = BFD_PARAXIAL + DELTA_HP_G4  # 实际写到 Zemax 最后一面的 thickness
+    # BFL_PHYSICAL = G4 后表面顶点 → 像面的物理空气间隙，用户直接指定（不再经近轴转换）
+    BFL_PHYSICAL = 8.0  # mm，物理后焦间隙
 
     # 保存路径
     SAVE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
