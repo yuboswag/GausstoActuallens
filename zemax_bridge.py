@@ -1146,9 +1146,9 @@ class ZemaxBridge:
         #   d2 → Surface 14 (Action_a 面13，zoom_configs[i][3])
         #   d3 → Surface 19 (Action_a 面18，zoom_configs[i][4])
         gap_map = [
-            (7,  2),   # (Zemax Surface 编号, zoom_configs 列索引)
-            (14, 3),
-            (19, 4),
+            (7,  2),   # d1: G1→G2（G1末面，Zemax Surface 7）
+            (10, 3),   # d2: G2→G3（G2末面，Zemax Surface 10）
+            (15, 4),   # d3: G3→G4（G3末面/光阑面，Zemax Surface 15）
         ]
         n_configs = len(zoom_configs)
 
